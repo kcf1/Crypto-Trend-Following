@@ -1,0 +1,16 @@
+arch==7.2.0
+loguru==0.7.3
+matplotlib==3.10.7
+MetaTrader5==5.0.5388
+nolds==0.6.2
+numpy==2.3.4
+pandas==2.3.3
+python-dotenv==1.2.1
+pytz==2025.2
+scikit_learn==1.7.2
+scipy==1.16.3
+seaborn==0.13.2
+statsmodels==0.14.5
+ta==0.11.0
+tqdm==4.67.1
+xgboost==3.1.1

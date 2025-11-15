@@ -1,0 +1,19 @@
+# Ignore .env file
+.env
+
+# Ignore database directory and its contents
+data/
+models/
+
+# Ignore other files for reference
+others/
+
+# Optional: Ignore Python virtual environment
+.venv/
+
+# Optional: Ignore temporary files and logs
+*.log
+temp_output.txt
+temp_output.csv
+__pycache__/
+*.pyc
