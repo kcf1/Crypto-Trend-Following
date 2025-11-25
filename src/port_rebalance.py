@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 
 from config import TZ, MODEL_DIR, logger
 from api_mt5 import is_mt5_ready, read_balance, adjust_position
-from db_read import get_contract_value, get_binance_symbol, read_klines
+from db_read import get_contract_value, get_binance_symbol, read_klines, read_mtbars
 from strat_models import BaseStrategy
 from strat_io import load_model
 from config import PORTFOLIO,MAX_HISTORY_HOURS,MAX_POSITION_PCT
@@ -26,7 +26,8 @@ def rebalance_portfolio() -> None:
     # --- Get account equity ---
     try:
         account_stats = read_balance()
-        capital = account_stats['equity']
+        #capital = account_stats['equity']
+        capital = 10000 # fixed capital since lots too sensitive
         logger.info(f"Account equity: {capital:,.2f} {account_stats['currency']}")
     except Exception as e:
         logger.critical(f"Failed to read balance: {e}")
@@ -67,7 +68,9 @@ def _rebalance_asset(symbol: str, capital_allocation: float) -> None:
         return
 
     try:
-        bars = read_klines(symbol_bnb, limit=MAX_HISTORY_HOURS).iloc[:-1]
+        #bars = read_klines(symbol_bnb, limit=MAX_HISTORY_HOURS)#.iloc[:-1]
+        bars = read_mtbars(symbol, limit=MAX_HISTORY_HOURS)#.iloc[:-1]
+        bars['volume'] = bars['tick_volume']
         if bars.empty or len(bars) < 100:
             logger.warning(f"Skipping {symbol}: insufficient data ({len(bars)} rows)")
             return
@@ -103,8 +106,8 @@ def _rebalance_asset(symbol: str, capital_allocation: float) -> None:
     # --- 4. Compute aggregate signal ---
     try:
         # Use latest close for all models
-        close_series = bars['close']
-        position_pct = sum(strat.one_step_predict(close_series) for strat in models)
+        #close_series = bars['close']
+        position_pct = sum(strat.one_step_predict(bars) for strat in models)
         #position_pct = max(min(position_pct, 2.0), -2.0)  # cap at ±200%
         logger.info(f"{symbol}: aggregate signal = {position_pct:+.2%}")
     except Exception as e:
@@ -112,7 +115,7 @@ def _rebalance_asset(symbol: str, capital_allocation: float) -> None:
         return
 
     # --- 5. Convert to lots ---
-    target_lots = round(position_pct * 10) / 10 * all_in_lots
+    target_lots = round(position_pct*10)/10 * all_in_lots
     target_lots = round(target_lots, 2)  # MT5 lot precision
     logger.info(f"{symbol}: target lots = {target_lots:+.2f}")
 
@@ -121,7 +124,7 @@ def _rebalance_asset(symbol: str, capital_allocation: float) -> None:
         adjust_position(
             symbol=symbol,
             target_volume=target_lots,
-            comment=f"rebalance_{datetime.now(TZ).strftime('%Y%m%d')}"
+            comment=f"trend"
         )
     except Exception as e:
         logger.error(f"Failed to adjust {symbol}: {e}")

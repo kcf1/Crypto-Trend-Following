@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     class TEXT NOT NULL,
     currency_base TEXT NOT NULL,
     currency_profit TEXT NOT NULL,
+    price REAL NOT NULL,
+    spread REAL NOT NULL,
     trade_contract_value REAL NOT NULL,
     trade_contract_size REAL NOT NULL,
     trade_tick_value REAL NOT NULL,

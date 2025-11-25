@@ -4,37 +4,7 @@ from typing import Union, Optional, List
 from datetime import datetime
 import time
 from config import BINANCE_BASE, logger
-
-def _to_milliseconds(
-    dt: Union[str, datetime, pd.Timestamp, int, float]
-) -> int:
-    """
-    Convert various datetime formats to milliseconds since epoch (UTC).
-    Supported inputs:
-        - int/float: milliseconds or seconds
-        - str: ISO format, e.g. '2025-01-01', '2025-01-01 12:00:00'
-        - datetime, pd.Timestamp
-    """
-    if dt is None:
-        return None
-
-    if isinstance(dt, (int, float)):
-        if dt > 10**12:  # likely milliseconds
-            return int(dt)
-        else:  # likely seconds
-            return int(dt * 1000)
-
-    if isinstance(dt, str):
-        # Handle common formats
-        dt = pd.to_datetime(dt, utc=True)
-    elif isinstance(dt, datetime):
-        dt = pd.to_datetime(dt, utc=True)
-    elif isinstance(dt, pd.Timestamp):
-        dt = dt.tz_convert('UTC') if dt.tzinfo else dt.tz_localize('UTC')
-    else:
-        raise ValueError(f"Unsupported time type: {type(dt)}")
-
-    return int(dt.timestamp() * 1000)
+from utils import to_milliseconds
 
 def get_klines(
     symbol: str,
@@ -94,10 +64,10 @@ def get_klines(
         'timeZone': time_zone
     }
     if start_time:
-        start_time = _to_milliseconds(start_time)
+        start_time = to_milliseconds(start_time)
         params['startTime'] = start_time
     if end_time:
-        end_time = _to_milliseconds(end_time)
+        end_time = to_milliseconds(end_time)
         params['endTime'] = end_time
 
     data = []

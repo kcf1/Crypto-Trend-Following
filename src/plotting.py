@@ -3,22 +3,43 @@ import pandas as pd
 import numpy as np
 from statsmodels.tsa.stattools import adfuller
 from scipy import stats
+from scipy.cluster.hierarchy import dendrogram, linkage, leaves_list
+from scipy.spatial.distance import squareform
 
 def pnl_curve(y,freq=1,ax=None):
     cur = y.cumsum()
     scaler = 24/freq
+    y_daily = y.resample('d').sum()
 
-    m,s = y.mean()*(360*scaler),y.std()*(360*scaler)**0.5
-    skew = y.skew()
+    m,s = y_daily.mean()*(360),y_daily.std()*(360)**0.5
+    skew = y_daily.resample('me').sum().skew()
     sr = m/s
-    hit = (y >= 0).mean()
-    dd05 = (cur - cur.cummax()).quantile(0.05)
+    hit = (y_daily >= 0).mean()
+    dd = cur - cur.cummax()
+    cdd95 = dd[dd<=dd.quantile(.05)].mean()
+    dd50 = dd.median()
     
     if ax is None: fig,ax = plt.subplots()
     cur.plot(ax=ax)
     ax.annotate(f'sr: {sr:.2f}, hit: {hit*100:.2f}%',xycoords='axes fraction',xy=(0.05,0.9))
-    ax.annotate(f'mean: {m*100:.2f}%, vol: {s*100:.2f}%',xycoords='axes fraction',xy=(0.05,0.8))
-    ax.annotate(f'dd05: {dd05*100:.2f}%, skew: {skew:.2f}',xycoords='axes fraction',xy=(0.05,0.7))
+    ax.annotate(f'mean: {m*100:.2f}%, vol: {s*100:.2f}%, skew: {skew:.2f}',xycoords='axes fraction',xy=(0.05,0.8))
+    ax.annotate(f'cdd95: {cdd95*100:.2f}%, dd50: {dd50*100:.2f}%',xycoords='axes fraction',xy=(0.05,0.7))
+    ax.annotate(f'cdd95-to-vol: {cdd95/s:.2f}, dd50-to-vol: {dd50/s:.2f}',xycoords='axes fraction',xy=(0.05,0.6))
+    return ax
+
+def realtime_pnl(y,ax=None):
+    cur = y.cumsum()
+
+    pnl = y.sum()
+    pnl_d = y.mean()*24
+    vol = y.std() * (360*24)**0.5
+    hit = (y >= 0).mean()
+    dd = (cur - cur.cummax()).iat[-1]
+    
+    if ax is None: fig,ax = plt.subplots()
+    cur.plot(ax=ax)
+    ax.annotate(f'accum pnl: {pnl:.2%}, daily avg: {pnl_d:.2%}',xycoords='axes fraction',xy=(0.05,0.15))
+    ax.annotate(f'vol: {vol:.2%}, drawdown: {dd:.2%}, hit: {hit:.2%}',xycoords='axes fraction',xy=(0.05,0.05))
     return ax
 
 def hist(y,ax=None):
@@ -117,7 +138,7 @@ def qqplot(data,
     ax.annotate(f'q05: {q05_emp:.3f}, q95: {q95_emp:.3f}', xycoords='axes fraction', xy=(0.05, 0.79), fontsize=9)
     return ax
 
-def scatter(x,y,ax=None):
+def scatter(x,y,ax=None,annot=None):
     idx = x.dropna().index.intersection(y.dropna().index)
     x,y = x.reindex(idx),y.reindex(idx)
 
@@ -140,6 +161,16 @@ def scatter(x,y,ax=None):
     ax.annotate(f'beta: {beta:.2f}',xycoords='axes fraction',xy=(0.05,0.9))
     ax.annotate(f'pearson: {pearson:.2f}%',xycoords='axes fraction',xy=(0.05,0.8))
     ax.annotate(f'spearman: {spearman:.2f}%',xycoords='axes fraction',xy=(0.05,0.7))
+
+    if annot is not None:
+        annot = annot.reindex(idx)
+        for i,j,k in zip(x,y,annot):
+            ax.annotate(
+                str(k), (i, j),
+                xytext=(8, 8), 
+                textcoords='offset points',
+                fontsize=8
+            )
     return ax
 
 def bin_scatter(x,y,ax=None):
@@ -195,3 +226,92 @@ def feat_stationarity(x):
         ax.annotate(f'skew: {skew:.2f}',xycoords='axes fraction',xy=(0.05,0.6))
 
     plt.show()
+
+def corr_dendrogram(
+    corr: pd.DataFrame,
+    method: str = 'ward',
+    title: str = 'Hierarchical Clustering (1 − Correlation distance)',
+    ax=None
+):
+    """
+    One-function solution: feed it your strategy correlation matrix → get beautiful dendrogram.
+    
+    Parameters
+    ----------
+    corr : pd.DataFrame
+        Square correlation matrix with strategy names as index/columns
+    method : str
+        Linkage method: 'ward', 'complete', 'average', 'single' (ward is almost always best)
+    """
+    # 1. Convert correlation → distance
+    dist = 1 - corr
+    
+    # 2. Make it condensed form for scipy
+    condensed_dist = squareform(dist, checks=False)
+    
+    # 3. Hierarchical clustering
+    Z = linkage(condensed_dist, method=method, optimal_ordering=True)
+    
+    # 4. Plot
+    if ax is None: fig,ax = plt.subplots()
+    dn = dendrogram(
+        Z,
+        labels=corr.columns.tolist(),
+        orientation='top',
+        leaf_rotation=90,
+        leaf_font_size=12,
+        color_threshold=None,           # color each cluster differently
+        above_threshold_color='gray',
+        ax=ax
+    )
+    
+    # Optional: add distance annotation on y-axis
+    ax.set_ylabel('Distance (1 − Correlation)')
+    ax.set_title(title)
+    ax.tick_params(axis='x', rotation=30, labelsize=10)
+    ax.set_xticklabels(ax.get_xticklabels(), 
+                   rotation=30, 
+                   ha='right', 
+                   rotation_mode='anchor')
+    
+    # Return optimal order so you can reorder anything else (PNL curves, etc.)
+    optimal_order = [corr.columns[i] for i in leaves_list(Z)]
+    print("Optimal leaf order →", optimal_order)
+    return optimal_order
+
+def monthly_sharpe(
+    pnl: pd.Series,
+    ax=None,
+    alpha: float = 0.5
+):
+    """
+    Plots clean calendar-month Sharpe ratio as green/red area.
+    One bar per month → no noise, super clean.
+    """
+    if ax is None: fig,ax = plt.subplots()
+
+    # 1. Monthly returns and volatility
+    monthly_ret = pnl.resample('ME').mean()
+    monthly_std = pnl.resample('ME').std()
+
+    # 2. Monthly Sharpe (annualized)
+    monthly_sharpe = monthly_ret / monthly_std * np.sqrt(24*360)
+    monthly_sharpe = monthly_sharpe.reindex(pnl.index).ffill()
+
+    # 3. Colors: green if positive, red if negative
+    colors = ['#00C853' if x >= 0 else '#FF5252' for x in monthly_sharpe]
+
+    # 4. Plot as clean area (or bar — area looks better with secondary_y)
+    monthly_sharpe.plot(
+        kind='area',
+        color=colors,
+        alpha=alpha,
+        ax=ax,
+        secondary_y=True,
+        linewidth=0,
+        stacked=False
+    )
+
+    # Clean touches
+    ax.right_ax.set_ylabel('Monthly Sharpe Ratio (annualized)')
+    return ax

@@ -4,6 +4,7 @@ import pandas as pd
 from typing import Optional, List
 from config import DB_PATH, logger
 from pathlib import Path
+from utils import to_milliseconds
 
 # ------------------------------------------------------------------ #
 # 1. Read klines (1h candles)
@@ -31,10 +32,10 @@ def read_klines(
 
     if start_time:
         query += " AND open_time >= ?"
-        params.append(start_time)
+        params.append(to_milliseconds(start_time))
     if end_time:
         query += " AND open_time <= ?"
-        params.append(end_time)
+        params.append(to_milliseconds(end_time))
 
     query += " ORDER BY open_time DESC"
     if limit:
@@ -91,7 +92,7 @@ def read_trades(
         params.append(since_id)
     if start_time:
         query += " AND time >= ?"
-        params.append(start_time)
+        params.append(to_milliseconds(start_time))
 
     query += " ORDER BY time DESC"
     if limit:
@@ -258,10 +259,10 @@ def read_mtbars(
 
     if start_time:
         query += " AND time >= ?"
-        params.append(start_time)
+        params.append(to_milliseconds(start_time))
     if end_time:
         query += " AND time <= ?"
-        params.append(end_time)
+        params.append(to_milliseconds(end_time))
 
     query += " ORDER BY time DESC"
     if limit:

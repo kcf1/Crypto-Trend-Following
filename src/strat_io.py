@@ -26,7 +26,6 @@ def save_model(
     Returns:
         str: saved filepath
     """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{model_name}_{symbol}.joblib"
     filedir = f"{MODEL_DIR}/{symbol}"
     filepath = f"{filedir}/{filename}"
@@ -68,3 +67,32 @@ def load_model(filepath: str) -> Dict[str, Any]:
 
     logger.success(f"Model loaded: {filepath} | Symbol: {data['symbol']}")
     return data
+
+def reset_models(symbol: str) -> None:
+    """
+    Delete all saved models for a symbol.
+
+    Args:
+        symbol: e.g. "BTCUSD"
+
+    Returns:
+        None
+    """
+    symbol_dir = Path(MODEL_DIR) / symbol
+    if not symbol_dir.exists():
+        logger.info(f"No models to delete: {symbol_dir} does not exist")
+        return
+
+    deleted = 0
+    for model_file in symbol_dir.glob("*.joblib"):
+        try:
+            model_file.unlink()  # delete file
+            logger.info(f"Deleted model: {model_file}")
+            deleted += 1
+        except Exception as e:
+            logger.error(f"Failed to delete {model_file}: {e}")
+
+    if deleted == 0:
+        logger.info(f"No .joblib models found in {symbol_dir}")
+    else:
+        logger.success(f"Deleted {deleted} model(s) for {symbol}")

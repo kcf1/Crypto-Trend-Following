@@ -8,11 +8,11 @@ from datetime import datetime
 logger.info("Starting rebalancing session...")
 init_mt5()
 
-onhour_offset(0)
+onhour_offset(offset_mins=0,offset_secs=-15)
 update_all_data()
 
 # run at 05 if 4am market close, at 00 if not
-if datetime.now(TZ).hour == 10: onhour_offset(offset_mins=5)
+if datetime.now(TZ).hour == 22: onhour_offset(offset_mins=-5,offset_secs=-15)
 rebalance_portfolio()
 
 shutdown_mt5()

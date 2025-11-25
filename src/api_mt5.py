@@ -193,6 +193,8 @@ def get_mt5_symbols(
         - class
         - currency_base
         - currency_profit
+        - price
+        - spread
         - trade_contract_value
         - trade_contract_size
         - trade_tick_value
@@ -224,9 +226,12 @@ def get_mt5_symbols(
     df['class'] = df['path'].str.replace('\\', ' ').str.split().str[0]
     if asset_class:
         df = df[df['class']==asset_class]
+
+    df['price'] = (df['bid'] + df['ask'])/2
+    df['spread'] = df['ask'] - df['bid']
     
     # Compute trade_contract_value
-    df['trade_contract_value'] = df['trade_tick_value'] / df['trade_tick_size'] * (df['bid'] + df['ask'])/2
+    df['trade_contract_value'] = df['trade_tick_value'] / df['trade_tick_size'] * df['price']
     
     # Select only needed columns
     selected_cols = [
@@ -234,6 +239,8 @@ def get_mt5_symbols(
         'class',
         'currency_base',
         'currency_profit',
+        'price',
+        'spread',
         'trade_contract_value',
         'trade_contract_size',
         'trade_tick_value',
@@ -246,6 +253,8 @@ def get_mt5_symbols(
     df['symbol_bnb'] = df['symbol']+'T'
     
     # Ensure types
+    df['price'] = df['price'].round(8)
+    df['spread'] = df['spread'].round(8)
     df['trade_contract_value'] = df['trade_contract_value'].round(8)
     df['trade_tick_value'] = df['trade_tick_value'].round(8)
     df['trade_tick_size'] = df['trade_tick_size'].round(8)
@@ -284,11 +293,11 @@ def get_mt5_bars(
     date_to_mt5 = date_to.astimezone(MT5_TZ).replace(tzinfo=pytz.UTC) if date_to.tzinfo else MT5_TZ.localize(date_to).replace(tzinfo=pytz.UTC)
     timeframe_mt5 = _INTERVAL_TO_TF[interval]
 
-    logger.info(f"Downloading {symbol} 1H bars: {date_from} → {date_to} (UTC)")
+    logger.info(f"Downloading {symbol} {interval} bars: {date_from} → {date_to} (UTC)")
 
     rates = mt5.copy_rates_range(symbol, timeframe_mt5, date_from_mt5, date_to_mt5)
     if rates is None or len(rates) == 0:
-        logger.warning(f"No 1H bars for {symbol}")
+        logger.warning(f"No {interval} bars for {symbol}")
         return pd.DataFrame()
 
     df = pd.DataFrame(rates)
@@ -302,7 +311,7 @@ def get_mt5_bars(
     df = df.sort_values('time')
     #df = df.set_index('time').sort_index()
 
-    logger.success(f"Downloaded {len(df)} 1H bars (converted to UTC)")
+    logger.success(f"Downloaded {len(df)} {interval} bars (converted to UTC)")
     return df
 
 # ------------------------------------------------------------------ #
@@ -649,9 +658,28 @@ def adjust_position(
     target_sign = 1 if target_volume > 0 else -1
     current_sign = 1 if current_total > 0 else -1 if current_total < 0 else 0
     
-    # --- SCENE 0: Close all (e.g. +0.1 → -0.1) ---
+    # --- No change ---
+    if abs(target_volume - current_total) < 9e-3:
+        logger.info("No change needed")
+        return []
+
+    # --- SCENE 0: Remain no position ---
+    if current_total == 0.0 and target_volume == 0:
+        logger.info(f"SCENE 0: Remain no position")
+        res = dict()
+        results.append(res)
+        return results
+
+    # --- SCENE 1: New position ---
+    if current_total == 0.0 and current_positions == []:
+        logger.info(f"SCENE 1: New order → open {target_volume:+.2f}")
+        res = order_send(symbol, target_volume, tp=tp, sl=sl, comment=comment or "new_order")
+        results.append(res)
+        return results
+    
+    # --- SCENE 2: Close all (e.g. +0.1 → -0.1) ---
     if target_volume == 0:
-        logger.info("SCENE 0: Close all")
+        logger.info("SCENE 2: Close all → close {current_total:+.2f}")
         # Close all
         for pos in current_positions:
             res = order_close(pos['ticket'], comment=comment or "close_all")
@@ -659,21 +687,17 @@ def adjust_position(
         results.append(res)
         return results
 
-    # --- SCENE 1: Reverse direction (e.g. +0.1 → -0.1) ---
-    if current_sign != 0 and target_sign != current_sign:
-        logger.info("SCENE 1: Reverse → close all, open new")
-        # Close all
-        for pos in current_positions:
-            res = order_close(pos['ticket'], comment=comment or "close_all")
-            results.append(res)
-        # Open new
-        res = order_send(symbol, target_volume, tp=tp, sl=sl, comment=comment or "new_reverse")
+    # --- SCENE 3: Increase (same direction, |target| > |current|) ---
+    if current_sign == target_sign and abs(target_volume) > abs(current_total):
+        diff = target_volume - current_total
+        logger.info(f"SCENE 3: Increase → open {diff:+.2f}")
+        res = order_send(symbol, diff, tp=tp, sl=sl, comment=comment or "increase")
         results.append(res)
         return results
 
-    # --- SCENE 2: Reduce (same direction, |target| < |current|) ---
+    # --- SCENE 4: Reduce (same direction, |target| < |current|) ---
     if current_sign == target_sign and abs(target_volume) < abs(current_total):
-        logger.info("SCENE 2: Reduce → close smallest first")
+        logger.info("SCENE 4: Reduce → close smallest first")
         # Sort by volume ascending
         sorted_pos = sorted(
             current_positions,
@@ -697,24 +721,16 @@ def adjust_position(
             remaining -= close_quantity
         return results
 
-    # --- SCENE 3: Increase (same direction, |target| > |current|) ---
-    if current_sign == target_sign and abs(target_volume) > abs(current_total):
-        diff = target_volume - current_total
-        logger.info(f"SCENE 3: Increase → open {diff:+.2f}")
-        res = order_send(symbol, diff, tp=tp, sl=sl, comment=comment or "increase")
+    # --- SCENE 5: Reverse direction (e.g. +0.1 → -0.1) ---
+    if current_sign != 0 and target_sign != current_sign:
+        logger.info("SCENE 5: Reverse → close all, open new")
+        # Close all
+        for pos in current_positions:
+            res = order_close(pos['ticket'], comment=comment or "close_all")
+            results.append(res)
+        # Open new
+        res = order_send(symbol, target_volume, tp=tp, sl=sl, comment=comment or "new_reverse")
         results.append(res)
         return results
-
-    # --- SCENE 4: New position ---
-    if current_total == 0.0 and current_positions == []:
-        logger.info(f"SCENE 4: New order → open {target_volume:+.2f}")
-        res = order_send(symbol, target_volume, tp=tp, sl=sl, comment=comment or "new_order")
-        results.append(res)
-        return results
-
-    # --- No change ---
-    if abs(target_volume - current_total) < 1e-6:
-        logger.info("No change needed")
-        return []
 
     raise RuntimeError("Unhandled case")

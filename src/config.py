@@ -67,9 +67,9 @@ PORTFOLIO: Final[List[str]] = [
     "ETHUSD",   # Ethereum
     "BNBUSD",   # BNB
     #"XRPUSD",
-    "SOLUSD",   # Solana
-    "DOGEUSD",  # Dogecoin
-    "ADAUSD",
+    #"SOLUSD",   # Solana
+    #"DOGEUSD",  # Dogecoin
+    #"ADAUSD",
     #"LTCUSD"
 ]
 

@@ -129,7 +129,7 @@ def save_symbols(df: pd.DataFrame) -> int:
 
     cols = [
         'symbol', 'symbol_bnb', 'class', 'currency_base', 'currency_profit',
-        'trade_contract_value', 'trade_contract_size',
+        'price', 'spread', 'trade_contract_value', 'trade_contract_size',
         'trade_tick_value', 'trade_tick_size'
     ]
     data = df[cols]
@@ -144,6 +144,8 @@ def save_symbols(df: pd.DataFrame) -> int:
         class = excluded.class,
         currency_base = excluded.currency_base,
         currency_profit = excluded.currency_profit,
+        price = excluded.price,
+        spread = excluded.spread,
         trade_contract_value = excluded.trade_contract_value,
         trade_contract_size = excluded.trade_contract_size,
         trade_tick_value = excluded.trade_tick_value,

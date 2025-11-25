@@ -91,7 +91,7 @@ def update_symbol_specs() -> None:
     logger.info("Updating symbol specifications...")
 
     try:
-        df = get_mt5_symbols()
+        df = get_mt5_symbols(asset_class='Crypto')
         if not df.empty:
             saved = save_symbols(df)
             logger.success(f"Updated {saved} symbols")
