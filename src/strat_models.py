@@ -4,7 +4,7 @@ import numpy as np
 from scipy.stats import weibull_min,norm
 from sklearn.base import BaseEstimator
 from typing import Tuple, Dict, Any, List
-from statsmodels.regression.rolling import RollingOLS
+from statsmodels.regression.rolling import RollingOLS,RollingWLS
 from statsmodels.api import OLS,add_constant
 from config import logger
 from utils import align_idx
@@ -128,7 +128,7 @@ class VolScaleStrategy(BaseStrategy):
         # --- Parameters ---
         self.vol_window = vol_window
         self.target_vol = target_vol
-        self.strat_weight = np.clip(strat_weight, 0.0, 1.0)
+        self.strat_weight = strat_weight
         
         # --- Fit Parameters ---
         self.to_target_scaler: float = 1.0
@@ -225,8 +225,7 @@ class VolScaleStrategy(BaseStrategy):
                 'target_vol': self.target_vol,
                 'strat_weight': self.strat_weight,
                 'to_target_scaler': self.to_target_scaler
-            },
-            'pnl_stats': self.pnl_stats
+            }
         }
     
 class WedThuStrategy(BaseStrategy):
@@ -245,7 +244,7 @@ class WedThuStrategy(BaseStrategy):
         # --- Parameters ---
         self.vol_window = vol_window
         self.target_vol = target_vol
-        self.strat_weight = np.clip(strat_weight, 0.0, 1.0)
+        self.strat_weight = strat_weight
         
         # --- Fit Parameters ---
         self.to_target_scaler: float = 1.0
@@ -283,6 +282,7 @@ class WedThuStrategy(BaseStrategy):
         s = pd.Series(0, prc.index)
         s[wed] = 1
         s[thu] = -1
+        s = s.shift(-1).fillna(0)
         
         # 2. Corresponding volatility
         scaled_vol_window = int(self.vol_window * 1/7) # correct vol window to capture 1 day in the week
@@ -336,6 +336,7 @@ class WedThuStrategy(BaseStrategy):
         s = pd.Series(0, prc.index)
         s[wed] = 1
         s[thu] = -1
+        s = s.shift(-1).fillna(0)
         
         # 2. Corresponding volatility
         scaled_vol_window = int(self.vol_window * 1/7) # correct vol window to capture 1 day in the week
@@ -398,8 +399,7 @@ class WedThuStrategy(BaseStrategy):
                 'target_vol': self.target_vol,
                 'strat_weight': self.strat_weight,
                 'to_target_scaler': self.to_target_scaler
-            },
-            'pnl_stats': self.pnl_stats
+            }
         }
 
 class EmaVolStrategy(BaseStrategy):
@@ -417,6 +417,7 @@ class EmaVolStrategy(BaseStrategy):
         vol_window: int = 24 * 30,
         weibull_c: float = 2.0,
         alpha: float = 1.0,              # Weight of vol_tilt (0 = no tilt, 1 = full tilt)
+        fit_decay: bool = True,
         target_vol: float = 0.5,
         strat_weight: float = 1.0
     ):
@@ -425,12 +426,14 @@ class EmaVolStrategy(BaseStrategy):
         self.slow_ema_multiplier = slow_ema_multiplier
         self.vol_window = vol_window
         self.weibull_c = weibull_c
-        self.alpha = np.clip(alpha, 0.0, 1.0)
+        self.alpha = alpha
+        self.fit_decay = fit_decay
         self.target_vol = target_vol
-        self.strat_weight = np.clip(strat_weight, 0.0, 1.0)
+        self.strat_weight = strat_weight
         
         # --- Fit Parameters (set in .fit()) ---
         self.cdf_median: float = 0.0
+        self.decay_deflator: float = 0.0
         self.to_target_scaler: float = 1.0
 
         # Stats
@@ -488,7 +491,17 @@ class EmaVolStrategy(BaseStrategy):
         tilt_component = (1.0 - self.alpha) + self.alpha * vol_tilt
 
         f = s * tilt_component
-        pos_raw = self.target_vol / v * f
+
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (f.shift(1)*log.diff()).ewm(span=24*90).mean()
+            self.decay_deflator = strat_pnl.abs().mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
+        pos_raw = self.target_vol / v * f * decay
         pnl = pos_raw * log.diff().shift(-1)
         pnl = pnl.dropna()
         if len(pnl) == 0:
@@ -545,9 +558,17 @@ class EmaVolStrategy(BaseStrategy):
         
         # Signal
         f = s * tilt_component
+
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (f.shift(1)*log.diff()).ewm(span=24*90).mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
         
         # Raw position
-        pos_raw = self.target_vol / v * f
+        pos_raw = self.target_vol / v * f * decay
         
         # Final position
         final_pos = pos_raw * self.to_target_scaler * self.strat_weight
@@ -557,46 +578,10 @@ class EmaVolStrategy(BaseStrategy):
         return final_pos
     
     def signal(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Generate raw signal from latest data.
-        """
-        self._check_data_length(X, ".fit()")
-
-        if not all(col in X.columns for col in ['close']):
-            raise ValueError("X must contain 'close'")
-
-        if not hasattr(self, 'cdf_median'):
-            raise RuntimeError("Call .fit() first")
-        
-        prc = X['close']
-        log = np.log(prc)
-        
-        # Recompute intermediates on full data
-        fast_ema = prc.ewm(span=self.fast_ema_window).mean()
-        slow_ema = prc.ewm(span=self.fast_ema_window * self.slow_ema_multiplier).mean()
-        s = fast_ema - slow_ema
-        s = s / s.ewm(span=self.vol_window).std()
-        s = s.iloc[self.vol_window + self.fast_ema_window * self.slow_ema_multiplier:]  # burn-in
-        s = s.clip(-2, 2)
-
-        #v = log.diff().ewm(span=self.vol_window).std() * ANNUAL_BARS**0.5
-        v = rogers_satchell_volatility(X,window=round(self.vol_window*.4)) * ANNUAL_BARS**0.5
-        
-        # CDF scaler
-        v_cdf = pd.Series(
-            weibull_min.cdf(v, c=self.weibull_c, scale=self.cdf_median * 1.5),
-            index=v.index
-        )
-        vol_tilt = 1 - v_cdf
-        # 5. Combined Signal with alpha blending
-        tilt_component = (1.0 - self.alpha) + self.alpha * vol_tilt
-        
-        # Signal
-        f = s * tilt_component * self.to_target_scaler * self.strat_weight
-        f = f.reindex(prc.index)
-        
-        #logger.info(f"Latest position: {final_pos.iloc[-1]:+.2%}")
-        return f
+        """Raw alpha signal before final vol scaling"""
+        pos = self.predict(X)
+        v = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        return (pos * v / self.target_vol).reindex(X.index, fill_value=0.0)
 
     def get_intermediates(self) -> Dict[str, Any]:
         """Return all intermediate series for inspection."""
@@ -611,8 +596,7 @@ class EmaVolStrategy(BaseStrategy):
                 'strat_weight': self.strat_weight,
                 'cdf_median': self.cdf_median,
                 'to_target_scaler': self.to_target_scaler
-            },
-            'pnl_stats': self.pnl_stats
+            }
         }
     
 class AccelVolStrategy(BaseStrategy):
@@ -635,6 +619,7 @@ class AccelVolStrategy(BaseStrategy):
         vol_window: int = 24 * 30,
         weibull_c: float = 2.0,
         alpha: float = 1.0,
+        fit_decay: bool = True,
         target_vol: float = 0.5,
         strat_weight: float = 1.0
     ):
@@ -643,12 +628,14 @@ class AccelVolStrategy(BaseStrategy):
         self.diff_multiplier = diff_multiplier
         self.vol_window = vol_window
         self.weibull_c = weibull_c
-        self.alpha = np.clip(alpha, 0.0, 1.0)
+        self.alpha = alpha
+        self.fit_decay = fit_decay
         self.target_vol = target_vol
-        self.strat_weight = np.clip(strat_weight, 0.0, 1.0)
+        self.strat_weight = strat_weight
 
         # Fit params
         self.cdf_median = 0.0
+        self.decay_deflator: float = 0.0
         self.to_target_scaler = 1.0
 
         logger.info("AccelVolStrategy initialized")
@@ -698,13 +685,22 @@ class AccelVolStrategy(BaseStrategy):
         tilt_comp = (1.0 - self.alpha) + self.alpha * vol_tilt
         f = s_accel * tilt_comp
 
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (f.shift(1)*log.diff()).ewm(span=24*90).mean()
+            self.decay_deflator = strat_pnl.abs().mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
         # Align
         idx = f.index.intersection(v.index)
         f = f.loc[idx]
         v = v.loc[idx]
 
         # 7. Calibrate scaler
-        pos_raw = self.target_vol / v * f
+        pos_raw = self.target_vol / v * f * decay
         pnl = pos_raw * log.diff().shift(-1).loc[idx].dropna()
         actual_vol = pnl.std() * ANNUAL_BARS**0.5
         self.to_target_scaler = self.target_vol / actual_vol if actual_vol > 1e-8 else 1.0
@@ -749,47 +745,26 @@ class AccelVolStrategy(BaseStrategy):
         tilt_comp = (1.0 - self.alpha) + self.alpha * vol_tilt
         f = s_accel * tilt_comp
 
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (f.shift(1)*log.diff()).ewm(span=24*90).mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
         idx = f.index.intersection(v.index)
         pos = pd.Series(0.0, index=X.index)
-        pos.loc[idx] = f.loc[idx] * self.target_vol / v.loc[idx]
+        pos.loc[idx] = f.loc[idx] * self.target_vol / v.loc[idx] * decay
         pos = pos * self.to_target_scaler * self.strat_weight
 
         return pos.reindex(X.index, fill_value=0.0)
     
     def signal(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Generate raw signal from latest data.
-        """
-        
-        self._check_data_length(X, ".predict()")
-        if not hasattr(self, 'cdf_median'):
-            raise RuntimeError("Call .fit() first")
-
-        prc = X['close']
-        log = np.log(prc)
-        diff_window = int(self.fast_ema_window * self.diff_multiplier)
-
-        fast = prc.ewm(span=self.fast_ema_window).mean()
-        slow = prc.ewm(span=self.fast_ema_window * self.slow_ema_multiplier).mean()
-        s_level = (fast - slow) / (fast - slow).ewm(span=self.vol_window).std()
-
-        s_accel_raw = s_level.diff(diff_window)
-        s_accel = s_accel_raw / s_accel_raw.ewm(span=self.vol_window).std()
-        s_accel = s_accel.clip(-2, 2)
-
-        #v = log.diff().ewm(span=self.vol_window).std() * ANNUAL_BARS**0.5
-        v = rogers_satchell_volatility(X,window=round(self.vol_window*.4)) * ANNUAL_BARS**0.5
-
-        scale = self.cdf_median * 1.5
-        v_cdf = pd.Series(weibull_min.cdf(v, c=self.weibull_c, scale=scale), index=v.index)
-        vol_tilt = 1 - v_cdf.clip(0, 1)
-
-        tilt_comp = (1.0 - self.alpha) + self.alpha * vol_tilt
-        f = s_accel * tilt_comp * self.to_target_scaler * self.strat_weight
-        f = f.reindex(prc.index)
-        
-        #logger.info(f"Latest position: {final_pos.iloc[-1]:+.2%}")
-        return f
+        """Raw alpha signal before final vol scaling"""
+        pos = self.predict(X)
+        v = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        return (pos * v / self.target_vol).reindex(X.index, fill_value=0.0)
 
     def get_intermediates(self) -> Dict[str, Any]:
         return {
@@ -801,8 +776,7 @@ class AccelVolStrategy(BaseStrategy):
                 'alpha': self.alpha,
                 'target_vol': self.target_vol,
                 'to_target_scaler': self.to_target_scaler,
-            },
-            'pnl_stats': self.pnl_stats
+            }
         }
     
 class BreakVolStrategy(BaseStrategy):
@@ -820,6 +794,7 @@ class BreakVolStrategy(BaseStrategy):
         vol_window: int = 24 * 30,
         weibull_c: float = 2.0,
         alpha: float = 1.0,              # Weight of vol_tilt (0 = no tilt, 1 = full tilt)
+        fit_decay: bool = True,
         target_vol: float = 0.5,
         strat_weight: float = 1.0
     ):
@@ -828,12 +803,14 @@ class BreakVolStrategy(BaseStrategy):
         self.smooth_window = smooth_window
         self.vol_window = vol_window
         self.weibull_c = weibull_c
-        self.alpha = np.clip(alpha, 0.0, 1.0)
+        self.alpha = alpha
+        self.fit_decay = fit_decay
         self.target_vol = target_vol
-        self.strat_weight = np.clip(strat_weight, 0.0, 1.0)
+        self.strat_weight = strat_weight
         
         # --- Fit Parameters ---
         self.cdf_median: float = 0.0
+        self.decay_deflator: float = 0.0
         self.to_target_scaler: float = 1.0
 
         # Stats
@@ -893,7 +870,17 @@ class BreakVolStrategy(BaseStrategy):
 
         # 7. Final signal
         f = s_smooth * tilt_component
-        pos_raw = self.target_vol / v * f
+
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (f.shift(1)*log.diff()).ewm(span=24*90).mean()
+            self.decay_deflator = strat_pnl.abs().mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
+        pos_raw = self.target_vol / v * f * decay
 
         # 8. Simulate PnL
         pnl = pos_raw * log.diff().shift(-1)
@@ -958,63 +945,29 @@ class BreakVolStrategy(BaseStrategy):
 
         # Final signal
         f = s_smooth * tilt_component
-        pos_raw = self.target_vol / v * f
+
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (f.shift(1)*log.diff()).ewm(span=24*90).mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
+        pos_raw = self.target_vol / v * f * decay
 
         # Final position
         final_pos = pos_raw * self.to_target_scaler * self.strat_weight
         final_pos = final_pos.reindex(prc.index)
 
-        logger.info(f"Latest position: {final_pos.iloc[-1]:+.2%}")
+        #logger.info(f"Latest position: {final_pos.iloc[-1]:+.2%}")
         return final_pos
     
     def signal(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Generate raw signal from latest data.
-        """
-        self._check_data_length(X, ".predict()")
-        if not hasattr(self, 'cdf_median'):
-            raise RuntimeError("Call .fit() first")
-
-        if not all(col in X.columns for col in ['close']):
-            raise ValueError("X must contain 'close'")
-
-        prc = X['close']
-        log = np.log(prc)
-
-        # Rolling high/low
-        h = prc.rolling(self.breakout_window).max()
-        l = prc.rolling(self.breakout_window).min()
-
-        # Raw breakout
-        mid = (h + l) / 2
-        rng = h - l
-        s = ((prc - mid) / rng * 2).replace([np.inf, -np.inf], np.nan)
-        s = s.iloc[self.breakout_window:]
-
-        # Smooth
-        s_smooth = s.ewm(span=self.smooth_window).mean()
-        s_smooth = s_smooth.iloc[self.smooth_window:]
-
-        # Vol forecast
-        #v = log.diff().ewm(span=self.vol_window).std() * ANNUAL_BARS**0.5
-        v = rogers_satchell_volatility(X,window=round(self.vol_window*.4)) * ANNUAL_BARS**0.5
-        v = v.iloc[self.vol_window:]
-
-        # Vol tilt
-        v_cdf = pd.Series(
-            weibull_min.cdf(v, c=self.weibull_c, scale=self.cdf_median * 1.5),
-            index=v.index
-        )
-        vol_tilt = 1 - v_cdf
-        # 5. Combined Signal with alpha blending
-        tilt_component = (1.0 - self.alpha) + self.alpha * vol_tilt
-
-        # Final signal
-        f = s_smooth * tilt_component * self.to_target_scaler * self.strat_weight
-        f = f.reindex(prc.index)
-        
-        #logger.info(f"Latest position: {final_pos.iloc[-1]:+.2%}")
-        return f
+        """Raw alpha signal before final vol scaling"""
+        pos = self.predict(X)
+        v = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        return (pos * v / self.target_vol).reindex(X.index, fill_value=0.0)
 
     def get_intermediates(self) -> Dict[str, Any]:
         return {
@@ -1028,9 +981,7 @@ class BreakVolStrategy(BaseStrategy):
                 'strat_weight': self.strat_weight,
                 'cdf_median': self.cdf_median,
                 'to_target_scaler': self.to_target_scaler
-            },
-            'pnl_stats': self.pnl_stats,
-            'pnl_stats_series': self.pnl_stats_series
+            }
         }
     
 class BlockVolStrategy(BaseStrategy):
@@ -1055,6 +1006,7 @@ class BlockVolStrategy(BaseStrategy):
         vol_window: int = 24 * 30,
         weibull_c: float = 2.0,
         alpha: float = 1.0,              # Weight of vol_tilt (0 = no tilt, 1 = full)
+        fit_decay: bool = True,
         target_vol: float = 0.5,
         strat_weight: float = 1.0
     ):
@@ -1064,12 +1016,14 @@ class BlockVolStrategy(BaseStrategy):
         # New
         self.vol_window = vol_window
         self.weibull_c = weibull_c
-        self.alpha = np.clip(alpha, 0.0, 1.0)
+        self.alpha = alpha
+        self.fit_decay = fit_decay
         self.target_vol = target_vol
-        self.strat_weight = np.clip(strat_weight, 0.0, 1.0)
+        self.strat_weight = strat_weight
         
         # --- Fit Parameters ---
         self.cdf_median: float = 0.0
+        self.decay_deflator: float = 0.0
         self.to_target_scaler: float = 1.0
 
         # Stats
@@ -1139,8 +1093,17 @@ class BlockVolStrategy(BaseStrategy):
         f = f.loc[idx]
         v = v.loc[idx]
 
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (f.shift(1)*log.diff()).ewm(span=24*90).mean()
+            self.decay_deflator = strat_pnl.abs().mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
         # Raw position & scaler calibration
-        pos_raw = self.target_vol / v * f
+        pos_raw = self.target_vol / v * f * decay
         pnl = pos_raw * log.diff().shift(-1).loc[idx]
         pnl = pnl.dropna()
 
@@ -1196,52 +1159,27 @@ class BlockVolStrategy(BaseStrategy):
         tilt_component = (1.0 - self.alpha) + self.alpha * vol_tilt
         f = s * tilt_component
 
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (f.shift(1)*log.diff()).ewm(span=24*90).mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
         # Position
         idx = f.index.intersection(v.index)
         pos = pd.Series(0.0, index=X.index)
-        pos.loc[idx] = f.loc[idx] * self.target_vol / v.loc[idx]
+        pos.loc[idx] = f.loc[idx] * self.target_vol / v.loc[idx] * decay
         pos = pos * self.to_target_scaler * self.strat_weight
 
         return pos.reindex(X.index, fill_value=0.0)
 
     def signal(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Generate raw signal from latest data.
-        """
-        self._check_data_length(X, ".predict()")
-
-        if not hasattr(self, 'cdf_median'):
-            raise RuntimeError("Call .fit() first")
-
-        prc = X['close']
-        log = np.log(prc)
-
-        h = prc.rolling(window=self.block_window).max()
-        l = prc.rolling(window=self.block_window).min()
-        rng = h - l
-
-        hh = h.diff(self.block_window)
-        ll = l.diff(self.block_window)
-
-        s_raw = (hh + ll) / 2 / rng.replace(0, np.nan)
-        s = s_raw.ewm(span=self.smooth_window).mean()
-        s = s.clip(-2, 2)
-
-        #v = log.diff().ewm(span=self.vol_window).std() * ANNUAL_BARS**0.5
-        v = rogers_satchell_volatility(X,window=round(self.vol_window*.4)) * ANNUAL_BARS**0.5
-
-        # Vol tilt
-        scale = self.cdf_median * 1.5
-        v_cdf = pd.Series(weibull_min.cdf(v, c=self.weibull_c, scale=scale), index=v.index)
-        vol_tilt = 1 - v_cdf.clip(0, 1)
-
-        # Blended signal
-        tilt_component = (1.0 - self.alpha) + self.alpha * vol_tilt
-        f = s * tilt_component * self.to_target_scaler * self.strat_weight
-        f = f.reindex(prc.index)
-        
-        #logger.info(f"Latest position: {final_pos.iloc[-1]:+.2%}")
-        return f
+        """Raw alpha signal before final vol scaling"""
+        pos = self.predict(X)
+        v = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        return (pos * v / self.target_vol).reindex(X.index, fill_value=0.0)
     
     def get_intermediates(self) -> Dict[str, Any]:
         return {
@@ -1255,222 +1193,7 @@ class BlockVolStrategy(BaseStrategy):
                 'strat_weight': self.strat_weight,
                 'cdf_median': self.cdf_median,
                 'to_target_scaler': self.to_target_scaler,
-            },
-            'pnl_stats': self.pnl_stats,
-        }
-    
-class SlopeVolStrategy(BaseStrategy):
-    """
-    Slope signal × Vol Tilt → Position
-    """
-    
-    def __init__(
-        self,
-        regression_window: int = 24,   # 5-day slope
-        vol_window: int = 24 * 30,
-        weibull_c: float = 2.0,
-        alpha: float = 1.0,              # Weight of vol_tilt (0 = no tilt, 1 = full tilt)
-        target_vol: float = 0.5,
-        strat_weight: float = 1.0
-    ):
-        # --- Parameters ---
-        self.regression_window = regression_window
-        self.vol_window = vol_window
-        self.weibull_c = weibull_c
-        self.alpha = np.clip(alpha, 0.0, 1.0)
-        self.target_vol = target_vol
-        self.strat_weight = np.clip(strat_weight, 0.0, 1.0)
-        
-        # --- Fit Parameters ---
-        self.cdf_median: float = 0.0
-        self.to_target_scaler: float = 1.0
-        
-        # Stats
-        self.pnl_stats: Dict[str, float] = {}
-        
-        logger.info("SlopeVolStrategy initialized")
-
-    def _check_data_length(self, price: pd.Series, method_name: str) -> int:
-        min_required = max(self.regression_window, self.vol_window) + 1
-        if len(price) <= min_required:
-            raise ValueError(
-                f"Data too short for {method_name}. "
-                f"Need > {min_required} rows, got {len(price)}."
-            )
-        return min_required
-
-    def fit(self, X: pd.Series, y: pd.Series = None) -> 'SlopeVolStrategy':
-        """
-        Fit CDF median and to-target scaler.
-        """
-        self._check_data_length(X, ".predict()")
-        if not hasattr(self, 'cdf_median'):
-            raise RuntimeError("Call .fit() first")
-
-        if not all(col in X.columns for col in ['close']):
-            raise ValueError("X must contain 'close'")
-
-        prc = X['close']
-        log = np.log(prc)
-
-        # 1. Rolling slope
-        slope,r2 = rolling_slope_vec(prc, self.regression_window)
-        S = slope * r2
-        S = S.iloc[self.regression_window:]
-
-        # 2. Standardize
-        s = S / S.ewm(span=self.vol_window).std()
-        s = s.iloc[self.vol_window:]
-
-        # 3. Annualized hourly vol
-        #v = log.diff().ewm(span=self.vol_window).std() * ANNUAL_BARS**0.5
-        v = rogers_satchell_volatility(X,window=round(self.vol_window*.4)) * ANNUAL_BARS**0.5
-        v = v.iloc[self.vol_window:]
-
-        # 4. Fit CDF median
-        self.cdf_median = v.median()
-        logger.info(f"Fit: CDF median = {self.cdf_median:.6f}")
-
-        # 5. Vol tilt
-        v_cdf = pd.Series(
-            weibull_min.cdf(v, c=self.weibull_c, scale=self.cdf_median * 1.5),
-            index=v.index
-        )
-        vol_tilt = 1 - v_cdf
-        # 5. Combined Signal with alpha blending
-        tilt_component = (1.0 - self.alpha) + self.alpha * vol_tilt
-
-        # 6. Final signal
-        f = s * tilt_component
-        pos_raw = self.target_vol / v * f
-
-        # 7. Simulate PnL
-        pnl = pos_raw * log.diff().shift(-1)
-        pnl = pnl.dropna()
-        if len(pnl) == 0:
-            raise ValueError("No valid PnL after alignment")
-
-        # 8. Fit to-target scaler
-        actual_vol = pnl.std() * ANNUAL_BARS**0.5
-        self.to_target_scaler = self.target_vol / actual_vol if actual_vol > 0 else 1.0
-
-        logger.info(f"Fit: to_target_scaler = {self.to_target_scaler:.6f}")
-
-        # 9. Final position + stats
-        final_pos = pos_raw * self.to_target_scaler * self.strat_weight
-        final_pos = final_pos.reindex(prc.index)
-        final_pnl = final_pos * log.diff().shift(-1)
-        
-        #self.calculate_pnl_stats(final_pnl, final_pos, log.diff().shift(-1))
-
-        logger.success("SlopeVolStrategy fitted")
-        return self
-
-    def predict(self, X: pd.Series) -> pd.Series:
-        """
-        Generate position from latest price.
-        """
-        self._check_data_length(X, ".predict()")
-        if not hasattr(self, 'cdf_median'):
-            raise RuntimeError("Call .fit() first")
-
-        if not all(col in X.columns for col in ['close']):
-            raise ValueError("X must contain 'close'")
-
-        prc = X['close']
-        log = np.log(prc)
-
-        # Rolling slope
-        slope,r2 = rolling_slope_vec(prc, self.regression_window)
-        S = slope * r2
-        S = S.iloc[self.regression_window:]
-
-        # Standardize
-        s = S / S.ewm(span=self.vol_window).std()
-        s = s.iloc[self.vol_window:]
-
-        # Vol forecast
-        #v = log.diff().ewm(span=self.vol_window).std() * ANNUAL_BARS**0.5
-        v = rogers_satchell_volatility(X,window=round(self.vol_window*.4)) * ANNUAL_BARS**0.5
-        v = v.iloc[self.vol_window:]
-
-        # Vol tilt
-        v_cdf = pd.Series(
-            weibull_min.cdf(v, c=self.weibull_c, scale=self.cdf_median * 1.5),
-            index=v.index
-        )
-        vol_tilt = 1 - v_cdf
-        # 5. Combined Signal with alpha blending
-        tilt_component = (1.0 - self.alpha) + self.alpha * vol_tilt
-
-        # Final signal
-        f = s * tilt_component
-        pos_raw = self.target_vol / v * f
-
-        # Final position
-        final_pos = pos_raw * self.to_target_scaler * self.strat_weight
-        final_pos = final_pos.reindex(prc.index)
-
-        logger.info(f"Latest position: {final_pos.iloc[-1]:+.2%}")
-        return final_pos
-
-    def signal(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Generate raw signal from latest data.
-        """
-        self._check_data_length(X, ".predict()")
-        if not hasattr(self, 'cdf_median'):
-            raise RuntimeError("Call .fit() first")
-
-        if not all(col in X.columns for col in ['close']):
-            raise ValueError("X must contain 'close'")
-
-        prc = X['close']
-        log = np.log(prc)
-
-        # Rolling slope
-        slope,r2 = rolling_slope_vec(prc, self.regression_window)
-        S = slope * r2
-        S = S.iloc[self.regression_window:]
-
-        # Standardize
-        s = S / S.ewm(span=self.vol_window).std()
-        s = s.iloc[self.vol_window:]
-
-        # Vol forecast
-        #v = log.diff().ewm(span=self.vol_window).std() * ANNUAL_BARS**0.5
-        v = rogers_satchell_volatility(X,window=round(self.vol_window*.4)) * ANNUAL_BARS**0.5
-        v = v.iloc[self.vol_window:]
-
-        # Vol tilt
-        v_cdf = pd.Series(
-            weibull_min.cdf(v, c=self.weibull_c, scale=self.cdf_median * 1.5),
-            index=v.index
-        )
-        vol_tilt = 1 - v_cdf
-        # 5. Combined Signal with alpha blending
-        tilt_component = (1.0 - self.alpha) + self.alpha * vol_tilt
-
-        # Final signal
-        f = s * tilt_component * self.to_target_scaler * self.strat_weight
-        f = f.reindex(prc.index)
-        
-        #logger.info(f"Latest position: {final_pos.iloc[-1]:+.2%}")
-        return f
-
-    def get_intermediates(self) -> Dict[str, Any]:
-        return {
-            'params': {
-                'regression_window': self.regression_window,
-                'vol_window': self.vol_window,
-                'weibull_c': self.weibull_c,
-                'alpha': self.alpha,
-                'target_vol': self.target_vol,
-                'strat_weight': self.strat_weight,
-                'cdf_median': self.cdf_median,
-                'to_target_scaler': self.to_target_scaler
-            },
-            'pnl_stats': self.pnl_stats
+            }
         }
     
 class BuySellVolStrategy(BaseStrategy):
@@ -1480,7 +1203,7 @@ class BuySellVolStrategy(BaseStrategy):
     Core signal:
         bsr_raw      = EMA(taker_buy_base_vol) / EMA(total_volume)
         bsr_z        = z-score of bsr_raw
-        vol_tilt     = 1 - Weibull_CDF(vol)   → lower during high-vol regimes
+        vol_tilt     = 1 - Weibull_CDF(vol)   → lower during high-vol decays
         final_signal = bsr_z * ((1 - alpha) + alpha * vol_tilt)
         pos          = final_signal * 0.5 / annualized_vol * scaler * weight
     
@@ -1503,12 +1226,13 @@ class BuySellVolStrategy(BaseStrategy):
         self.smooth_window = smooth_window
         self.vol_window = vol_window
         self.weibull_c = weibull_c
-        self.alpha = np.clip(alpha, 0.0, 1.0)
+        self.alpha = alpha
         self.target_vol = target_vol
-        self.strat_weight = np.clip(strat_weight, 0.0, 1.0)
+        self.strat_weight = strat_weight
         
         # --- Fit Parameters ---
         self.cdf_median: float = 0.0
+        self.decay_deflator: float = 0.0
         self.to_target_scaler: float = 1.0
 
         # Stats
@@ -1685,15 +1409,13 @@ class BuySellVolStrategy(BaseStrategy):
                 'strat_weight': self.strat_weight,
                 'cdf_median': self.cdf_median,
                 'to_target_scaler': self.to_target_scaler,
-            },
-            'pnl_stats': self.pnl_stats,
+            }
         }
     
-
 class RevStrategy(BaseStrategy):
     """
     Short-term reversal with volume filter
-    rev = -sign(ret_z) only when |ret_z| > threshold AND volume regime is high
+    rev = -sign(ret_z) only when |ret_z| > threshold AND volume decay is high
     pos = rev * 0.5 / vol   → scaled to target volatility
     """
 
@@ -1706,12 +1428,12 @@ class RevStrategy(BaseStrategy):
         target_vol: float = 0.5,
         strat_weight: float = 1.0
     ):
-        self.vol_window = int(vol_window)
-        self.reversal_window = int(reversal_window)
-        self.reversal_threshold = float(reversal_threshold)
-        self.volume_threshold = float(volume_threshold)
-        self.target_vol = float(target_vol)
-        self.strat_weight = np.clip(float(strat_weight), 0.0, 1.0)
+        self.vol_window = vol_window
+        self.reversal_window = reversal_window
+        self.reversal_threshold = reversal_threshold
+        self.volume_threshold = volume_threshold
+        self.target_vol = target_vol
+        self.strat_weight = strat_weight
 
         self.to_target_scaler: float = 1.0
         self.pnl_stats: Dict[str, float] = {}
@@ -1736,7 +1458,7 @@ class RevStrategy(BaseStrategy):
         #v = log_ret.ewm(span=self.vol_window).std()
         v = rogers_satchell_volatility(X,window=round(self.vol_window*.4)) #* ANNUAL_BARS**0.5
 
-        # volume regime
+        # volume decay
         vlm_z = vlm.ewm(span=self.reversal_window).mean()
         vlm_z = (vlm_z - vlm_z.rolling(self.vol_window).min()) / (
                 vlm_z.rolling(self.vol_window).max() - vlm_z.rolling(self.vol_window).min() + 1e-8)
@@ -1824,6 +1546,379 @@ class RevStrategy(BaseStrategy):
                 'target_vol': self.target_vol,
                 'strat_weight': self.strat_weight,
                 'to_target_scaler': self.to_target_scaler,
-            },
-            'pnl_stats': self.pnl_stats
+            }
+        }
+    
+class OrthAlphaStrategy(BaseStrategy):
+    """
+    Pure Alpha-Follow Strategy (Momentum-Orthogonal Alpha)
+    
+    1. Build classic momentum signal dp (fast - slow EMA)
+    2. Regress forward risk-adjusted returns on dp
+    3. Take residuals → smooth → vol-standardize → clip → this is pure alpha
+    4. Position = alpha_signal * target_vol / asset_vol * scaler * weight
+    → No vol decay tilt, no Weibull, no blending
+    """
+
+    def __init__(
+        self,
+        forward_window: int = 24,
+        vol_window: int = 24 * 30,
+        regression_window: int = 24 * 90,   # ~3 months
+        alpha: float = 1.0,              # Weight of vol_tilt (0 = no tilt, 1 = full tilt)
+        fit_decay: bool = True,
+        target_vol: float = 0.5,
+        strat_weight: float = 1.0
+    ):
+        self.forward_window = forward_window
+        self.vol_window = vol_window
+        self.regression_window = regression_window
+        self.alpha = alpha
+        self.fit_decay = fit_decay
+        self.target_vol = target_vol
+        self.strat_weight = strat_weight
+
+        # Fit-time calibrations
+        self.decay_deflator: float = 0.0
+        self.to_target_scaler: float = 1.0
+
+        logger.info("OrthAlphaStrategy initialized (pure orthogonal alpha)")
+
+    def _check_data_length(self, price: pd.Series, method_name: str) -> int:
+        min_required = max(
+            self.vol_window * 2,
+            self.regression_window + self.forward_window * 4,
+        )
+        if len(price) <= min_required:
+            raise ValueError(
+                f"Data too short for {method_name}. Need > {min_required}, got {len(price)}."
+            )
+        return min_required
+
+    def fit(self, X: pd.DataFrame, y: pd.Series = None) -> 'OrthAlphaStrategy':
+        self._check_data_length(X['close'], ".fit()")
+
+        prc = X['close']
+        log_prc = np.log(prc)
+
+        # 1. Momentum signal dp
+        fast = prc.ewm(span=self.forward_window).mean()
+        slow = prc.ewm(span=self.forward_window * 2).mean()
+        dp = (fast - slow) / (fast - slow).ewm(span=self.vol_window).std()
+        dp = dp.clip(-2, 2)
+
+        # 2. Forward risk-adjusted return
+        fwd_ret = log_prc.diff(self.forward_window) / self.forward_window * ANNUAL_BARS
+        vol = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        y = fwd_ret / vol
+
+        # 3. Rolling regression + extract alpha (residuals)
+        x = add_constant(dp.shift(self.forward_window))
+        x, y = align_idx(x, y)
+        model = RollingOLS(y, x, window=self.regression_window).fit()
+        alpha_raw = model.params['const']
+        t_raw = model.tvalues['const']
+
+        # 4. Smooth & standardize alpha
+        alpha_signal = alpha_raw / alpha_raw.ewm(span=self.vol_window).std()
+        alpha_signal = alpha_signal.clip(-2, 2)
+        
+        # 5. T-value tilt
+        t_tilt = t_raw.abs().clip(upper=2) / 2
+        tilt_component = (1.0 - self.alpha) + self.alpha * t_tilt
+
+        alpha_signal = alpha_signal * tilt_component
+
+        # Burn-in
+        burn = self.regression_window + self.forward_window * 2
+        alpha_signal = alpha_signal.iloc[burn:]
+
+        # 5. Volatility (same as template)
+        v = vol
+
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (alpha_signal.shift(1)*log_prc.diff()).ewm(span=24*90).mean()
+            self.decay_deflator = strat_pnl.abs().mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
+        # 6. Simulate PnL to calibrate position scaler
+        pos_raw = self.target_vol / v * alpha_signal * decay
+        pnl = pos_raw * log_prc.diff().shift(-1)
+        pnl = pnl.dropna()
+
+        if len(pnl) == 0:
+            raise ValueError("No valid PnL after fit")
+
+        actual_vol = pnl.std() * ANNUAL_BARS**0.5
+        self.to_target_scaler = self.target_vol / actual_vol if actual_vol > 0 else 1.0
+
+        logger.info(f"OrthAlphaStrategy fitted | to_target_scaler = {self.to_target_scaler:.4f}")
+        return self
+
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        if not hasattr(self, 'to_target_scaler'):
+            raise RuntimeError("Call .fit() first")
+
+        prc = X['close']
+        log_prc = np.log(prc)
+
+        # 1. Momentum signal dp
+        fast = prc.ewm(span=self.forward_window).mean()
+        slow = prc.ewm(span=self.forward_window * 2).mean()
+        dp = (fast - slow) / (fast - slow).ewm(span=self.vol_window).std()
+        dp = dp.clip(-2, 2)
+
+        # 2. Forward risk-adjusted return
+        fwd_ret = log_prc.diff(self.forward_window) / self.forward_window * ANNUAL_BARS
+        vol = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        y = fwd_ret / vol
+
+        # 3. Rolling regression + extract alpha (residuals)
+        x = add_constant(dp.shift(self.forward_window))
+        x, y = align_idx(x, y)
+        model = RollingOLS(y, x, window=self.regression_window).fit()
+        alpha_raw = model.params['const']
+        t_raw = model.tvalues['const']
+
+        # 4. Smooth & standardize alpha
+        alpha_signal = alpha_raw / alpha_raw.ewm(span=self.vol_window).std()
+        alpha_signal = alpha_signal.clip(-2, 2)
+        
+        # 5. T-value tilt
+        t_tilt = t_raw.abs().clip(upper=2) / 2
+        tilt_component = (1.0 - self.alpha) + self.alpha * t_tilt
+        
+        alpha_signal = alpha_signal * tilt_component
+
+        # Burn-in
+        burn = self.regression_window + self.forward_window * 2
+        alpha_signal = alpha_signal.iloc[burn:]
+
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (alpha_signal.shift(1)*log_prc.diff()).ewm(span=24*90).mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
+        # 5. Volatility (same as template)
+        v = vol
+        pos_raw = self.target_vol / v * alpha_signal * decay
+        final_pos = pos_raw * self.to_target_scaler * self.strat_weight
+        final_pos = final_pos.reindex(prc.index, fill_value=0.0)
+
+        return final_pos
+
+    def signal(self, X: pd.DataFrame) -> pd.Series:
+        """Raw alpha signal before final vol scaling"""
+        pos = self.predict(X)
+        v = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        return (pos * v / self.target_vol).reindex(X.index, fill_value=0.0)
+
+    def get_intermediates(self) -> Dict[str, Any]:
+        return {
+            'params': {
+                'forward_window': self.forward_window,
+                'vol_window': self.vol_window,
+                'regression_window': self.regression_window,
+                'target_vol': self.target_vol,
+                'strat_weight': self.strat_weight,
+                'to_target_scaler': self.to_target_scaler,
+            }
+        }
+       
+class WeightedOrthAlphaStrategy(BaseStrategy):
+    """
+    Pure Alpha-Follow Strategy (Momentum-Orthogonal Alpha)
+    
+    1. Build classic momentum signal dp (fast - slow EMA)
+    2. Regress forward risk-adjusted returns on dp
+    3. Take residuals → smooth → vol-standardize → clip → this is pure alpha
+    4. Position = alpha_signal * target_vol / asset_vol * scaler * weight
+    → No vol decay tilt, no Weibull, no blending
+    """
+
+    def __init__(
+        self,
+        forward_window: int = 24,
+        vol_window: int = 24 * 30,
+        regression_window: int = 24 * 90,   # ~3 months
+        alpha: float = 1.0,              # Weight of vol_tilt (0 = no tilt, 1 = full tilt)
+        fit_decay: bool = True,
+        target_vol: float = 0.5,
+        strat_weight: float = 1.0
+    ):
+        self.forward_window = forward_window
+        self.vol_window = vol_window
+        self.regression_window = regression_window
+        self.alpha = alpha
+        self.fit_decay = fit_decay
+        self.target_vol = target_vol
+        self.strat_weight = strat_weight
+
+        # Fit-time calibrations
+        self.decay_deflator: float = 0.0
+        self.to_target_scaler: float = 1.0
+
+        logger.info("OrthAlphaStrategy initialized (pure orthogonal alpha)")
+
+    def _check_data_length(self, price: pd.Series, method_name: str) -> int:
+        min_required = max(
+            self.vol_window * 2,
+            self.regression_window + self.forward_window * 4,
+        )
+        if len(price) <= min_required:
+            raise ValueError(
+                f"Data too short for {method_name}. Need > {min_required}, got {len(price)}."
+            )
+        return min_required
+
+    def fit(self, X: pd.DataFrame, y: pd.Series = None) -> 'OrthAlphaStrategy':
+        self._check_data_length(X['close'], ".fit()")
+
+        prc = X['close']
+        vlm = X['volume']
+        log_prc = np.log(prc)
+        log_vlm = np.log(vlm + 1e-8)
+
+        # 1. Momentum signal dp
+        fast = prc.ewm(span=self.forward_window).mean()
+        slow = prc.ewm(span=self.forward_window * 2).mean()
+        dp = (fast - slow) / (fast - slow).ewm(span=self.vol_window).std()
+        dp = dp.clip(-2, 2)
+
+        # 2. Forward risk-adjusted return
+        fwd_ret = log_prc.diff(self.forward_window) / self.forward_window * ANNUAL_BARS
+        vol = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        y = fwd_ret / vol
+
+        # 3. Rolling regression + extract alpha (residuals)
+        x = add_constant(dp.shift(self.forward_window))
+        x, y = align_idx(x, y)
+        w = 1.0 / (vol**2)
+        w = w.reindex(x.index)
+        model = RollingWLS(y, x, window=self.regression_window, weights=w).fit()
+        alpha_raw = model.params['const']
+        t_raw = model.tvalues['const']
+
+        # 4. Smooth & standardize alpha
+        alpha_signal = alpha_raw / alpha_raw.ewm(span=self.vol_window).std()
+        alpha_signal = alpha_signal.clip(-2, 2)
+        
+        # 5. T-value tilt
+        t_tilt = t_raw.abs().clip(upper=2) / 2
+        tilt_component = (1.0 - self.alpha) + self.alpha * t_tilt
+
+        alpha_signal = alpha_signal * tilt_component
+
+        # Burn-in
+        burn = self.regression_window + self.forward_window * 2
+        alpha_signal = alpha_signal.iloc[burn:]
+
+        # 5. Volatility (same as template)
+        v = vol
+
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (alpha_signal.shift(1)*log_prc.diff()).ewm(span=24*90).mean()
+            self.decay_deflator = strat_pnl.abs().mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
+        # 6. Simulate PnL to calibrate position scaler
+        pos_raw = self.target_vol / v * alpha_signal * decay
+        pnl = pos_raw * log_prc.diff().shift(-1)
+        pnl = pnl.dropna()
+
+        if len(pnl) == 0:
+            raise ValueError("No valid PnL after fit")
+
+        actual_vol = pnl.std() * ANNUAL_BARS**0.5
+        self.to_target_scaler = self.target_vol / actual_vol if actual_vol > 0 else 1.0
+
+        logger.info(f"OrthAlphaStrategy fitted | to_target_scaler = {self.to_target_scaler:.4f}")
+        return self
+
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        if not hasattr(self, 'to_target_scaler'):
+            raise RuntimeError("Call .fit() first")
+
+        prc = X['close']
+        vlm = X['volume']
+        log_prc = np.log(prc)
+        log_vlm = np.log(vlm + 1e-8)
+
+        # 1. Momentum signal dp
+        fast = prc.ewm(span=self.forward_window).mean()
+        slow = prc.ewm(span=self.forward_window * 2).mean()
+        dp = (fast - slow) / (fast - slow).ewm(span=self.vol_window).std()
+        dp = dp.clip(-2, 2)
+
+        # 2. Forward risk-adjusted return
+        fwd_ret = log_prc.diff(self.forward_window) / self.forward_window * ANNUAL_BARS
+        vol = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        y = fwd_ret / vol
+
+        # 3. Rolling regression + extract alpha (residuals)
+        x = add_constant(dp.shift(self.forward_window))
+        x, y = align_idx(x, y)
+        w = 1.0 / (vol**2)
+        w = w.reindex(x.index)
+        model = RollingWLS(y, x, window=self.regression_window, weights=w).fit()
+        alpha_raw = model.params['const']
+        t_raw = model.tvalues['const']
+
+        # 4. Smooth & standardize alpha
+        alpha_signal = alpha_raw / alpha_raw.ewm(span=self.vol_window).std()
+        alpha_signal = alpha_signal.clip(-2, 2)
+        
+        # 5. T-value tilt
+        t_tilt = t_raw.abs().clip(upper=2) / 2
+        tilt_component = (1.0 - self.alpha) + self.alpha * t_tilt
+        
+        alpha_signal = alpha_signal * tilt_component
+
+        # Burn-in
+        burn = self.regression_window + self.forward_window * 2
+        alpha_signal = alpha_signal.iloc[burn:]
+
+        # ext. Strategy decay decay
+        if self.fit_decay:
+            strat_pnl = (alpha_signal.shift(1)*log_prc.diff()).ewm(span=24*90).mean()
+            decay = strat_pnl / self.decay_deflator
+            decay = 0.75 + 0.25 * (-decay.clip(-2,2)/2)
+        else:
+            decay = 1
+
+        # 5. Volatility (same as template)
+        v = vol
+        pos_raw = self.target_vol / v * alpha_signal * decay
+        final_pos = pos_raw * self.to_target_scaler * self.strat_weight
+        final_pos = final_pos.reindex(prc.index, fill_value=0.0)
+
+        return final_pos
+
+    def signal(self, X: pd.DataFrame) -> pd.Series:
+        """Raw alpha signal before final vol scaling"""
+        pos = self.predict(X)
+        v = rogers_satchell_volatility(X, window=round(self.vol_window * 0.4)) * ANNUAL_BARS**0.5
+        return (pos * v / self.target_vol).reindex(X.index, fill_value=0.0)
+
+    def get_intermediates(self) -> Dict[str, Any]:
+        return {
+            'params': {
+                'forward_window': self.forward_window,
+                'vol_window': self.vol_window,
+                'regression_window': self.regression_window,
+                'target_vol': self.target_vol,
+                'strat_weight': self.strat_weight,
+                'to_target_scaler': self.to_target_scaler,
+            }
         }

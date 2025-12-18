@@ -1,7 +1,7 @@
 import pandas as pd
 from api_bnb import get_klines
 from api_mt5 import get_mt5_symbols,init_mt5,get_mt5_bars
-from db_load import init_db,save_symbols
+from db_load import init_db,save_symbols,save_mtbars
 from db_read import read_klines,read_mtbars
 from datetime import datetime
 

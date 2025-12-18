@@ -19,87 +19,68 @@ from scipy import stats
 from itertools import combinations,product
 from tqdm import tqdm
 import seaborn as sns
+from api_mt5 import get_mt5_bars,init_mt5
+from fast_func import rogers_satchell_volatility
 
 
 symbols = [
     "BTCUSD",   # Bitcoin
     "ETHUSD",   # Ethereum
     "BNBUSD",   # BNB
-    "SOLUSD",   # Solana
-    "DOGEUSD",  # Dogecoin
-    "ADAUSD",
-    "XRPUSD",
-    "LTCUSD"
 ]
 
 all_prc = pd.DataFrame()
-start_date = datetime(2020,1,1)
-end_date = datetime(2023,1,1)
-for symbol in symbols:
-    all_prc[symbol] = read_klines(symbol+'T',start_time=start_date,end_time=end_date)['close']
+start_date = datetime(2018,1,1)
+end_date = datetime(2025,12,1)
 
-r,c = 2,3
-#fig,axes = plt.subplots(r,c)
-pair_r = pd.DataFrame(index=symbols,columns=symbols)
-v_r = []
-r_r = []
-pair = []
-for i,(s1,s2) in tqdm(enumerate(product(['BTCUSD'],['BNBUSD','SOLUSD','DOGEUSD','ADAUSD','XRPUSD','LTCUSD']))):
-    #if i >= 5: break
-    p1,p2 = all_prc[s1],all_prc[s2]
-    l1,l2 = np.log(p1),np.log(p2)
-    r1,r2 = l1.diff(),l2.diff()
-    v1,v2 = r1.ewm(span=24*30).std(),r2.ewm(span=24*30).std()
+pnls = pd.DataFrame()
 
-    x,y = v1,v2
-    x,y = align_idx(x,y)
-    #mod = OLS(y,add_constant(x)).fit()
-    #pair_r.loc[s1,s2] = mod.rsquared
-    #if mod.rsquared >= .65:
-    #v_r.append(mod.rsquared)
+r,c = 2,4
+fig,axes = plt.subplots(r,c)
+for i,symbol in tqdm(enumerate(symbols)):
+    #bars = read_klines(symbol+'T',limit=24*360*5)
+    #vlm_bnb = bars['volume']
+    bars = read_mtbars(symbol,limit=24*360*5)
+    #vlm_mt = bars['tick_volume']
 
-    #x,y = r1,r2
-    #x,y = align_idx(x,y)
-    #mod = OLS(y,add_constant(x)).fit()
-    #pair_r.loc[s1,s2] = mod.rsquared
-    #r_r.append(mod.rsquared)
+    #corrs = []
+    #for n in range(1,97):
+    #    n = 3
+    #    vlm_bnb = vlm_bnb.ewm(span=n).mean()
+    #    vlm_bnb = vlm_bnb / vlm_bnb.ewm(span=24*30).std()
+    #    vlm_mt = vlm_mt.ewm(span=n).mean()
+    #    vlm_mt = vlm_mt / vlm_mt.ewm(span=24*30).std()
+    #    corrs.append(vlm_bnb.corr(vlm_mt))
+    #corrs = pd.Series(corrs,index=range(1,97))
 
-    #pair.append((s1,s2))
+    #ax1,ax2 = axes[0,i%c],axes[1,i%c]
+    #corrs.plot()
+    #vlm_bnb.rolling(24*360).corr(vlm_mt).plot(ax=ax1)
 
-    #print(s1,s2,f'{mod.rsquared:.2%}')
+    prc = bars['close']
+    vlm = bars['tick_volume']
 
-    mod = RollingOLS(y,add_constant(x),window=24*30,min_nobs=24*30).fit()
-    hedge = mod.params.ewm(span=24).mean()
-    w1 = hedge.iloc[:,1]
-    w2 = pd.Series(-1,hedge.index)
-    c1 = r1.mul(w1,axis=0)
-    c2 = r2.mul(w2,axis=0)
-    a = hedge.iloc[:,0]
-    resid = -pd.concat([c1,c2,a],axis=1).sum(axis=1)
-    mse = mod.mse_resid
-    z = (resid / mse)
-    #z = z#.ewm(span=12).mean()
-    #z = z / z.ewm(span=24*30).std()
-    #z.plot()
+    n = 34
+    vlm_z = vlm.ewm(span=24).mean()
+    vlm_z = (vlm_z - vlm_z.ewm(span=24*30).mean()) / vlm_z.ewm(span=24*30).std()
+    vlm_z = vlm_z
+    #vlm_z = vlm_z.clip(-2,2)
+    vlm_tilt = (1 - pd.Series(norm.cdf(vlm_z),index=vlm_z.index).clip(lower=0.8))
+    #vlm_tilt.plot()
     #plt.show()
-    #exit()
+    dp = prc.ewm(span=24).mean() - prc.ewm(span=48).mean()
+    dp = dp / dp.ewm(span=24*30).std()
+    dp = dp.clip(-2,2)
+    vol = rogers_satchell_volatility(bars,window=24*12)
 
-    #print(resid1.corr(resid2))
+    regress_incremental(vlm_z,bars,horizon=24)
 
-    tf = pd.Series(np.where(z.abs() >= z.abs().expanding(24*30).quantile(.95), np.sign(z), 0), z.index)
-    p1 = tf.mul(w1)
-    p2 = tf.mul(w2)
-    p1 = p1.mul(r1.shift(-1),axis=0) - p1.diff().abs() * .0003
-    p2 = p2.mul(r2.shift(-1),axis=0) - p2.diff().abs() * .0003
-    o = p1+p2
-    #ax = scatter(tf,o)
-    o.cumsum().plot()
-    #p1.cumsum().plot()
-    #p2.cumsum().plot()
-    #ax.set_title(str(s1)+str(s2))
+    r1 = np.log(prc).diff().shift(-1)
+    pos = (dp*vlm_tilt) * .3 / 95 / vol
+    pnl1 = pos * r1 - pos.diff().abs() * 0.0010
+
+    ax1,ax2 = axes[0,i%c],axes[1,i%c]
+    pnl_curve(pnl1,ax=ax1)
+    pnls[symbol] = pnl1
+#pnl_curve(pnls.mean(axis=1))
 plt.show()
-
-#ax = scatter(pd.Series(v_r),pd.Series(r_r),annot=pd.Series(pair))
-#ax.set_title('Vol R2 (x) vs Ret R2 (y)')
-#sns.heatmap(pair_r.astype(float),annot=True)
-#plt.show()

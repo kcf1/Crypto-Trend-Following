@@ -10,7 +10,7 @@ from statsmodels.api import OLS,add_constant
 from utils import align_idx,triple_barrier
 from plotting import pnl_curve,scatter,hist,qqplot,corr_dendrogram,monthly_sharpe
 from scipy.stats import gamma,weibull_min,lognorm
-from strat_models import EmaVolStrategy,VolScaleStrategy,BreakVolStrategy,SlopeVolStrategy,BlockVolStrategy,AccelVolStrategy,WedThuStrategy,RevStrategy
+from strat_models import *
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.ensemble import RandomForestClassifier
 from lightgbm import LGBMClassifier
@@ -25,15 +25,25 @@ from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from performance import calcaulte_pnl_stats
 from scipy.stats import ttest_1samp
 from ta import add_all_ta_features
+from itertools import combinations
+from strat_cv import BlockBootstrap
+from multiprocessing import Pool
 
 symbols = PORTFOLIO
+info = read_symbols()
+info = info.set_index('symbol')
+info['commission'] = np.where(info['class']=='Crypto',.00065,0)
+spread = info['spread']/info['price']
+slippage = .0001
+commission = info['commission']
+cost = spread / 2 + slippage + commission
 
-r,c = 2,len(symbols)
-fig,axes = plt.subplots(r,c)
+port = pd.DataFrame()
+bnch = pd.DataFrame()
 for i,symbol in enumerate(symbols):
     poss = dict()
     sigs = dict()
-    df = read_mtbars(symbol,limit=24*360*6)
+    df = read_mtbars(symbol,limit=24*360*5)
     df['volume'] = df['tick_volume']
     ret = np.log(df['close']).diff().shift(-1)
     #df = read_klines(symbol+'T',limit=24*360*5)
@@ -50,59 +60,52 @@ for i,symbol in enumerate(symbols):
         for name in os.listdir(model_dir):
             strat = load_model(f'{model_dir}/{name}')['model']
             pos = strat.predict(x)
-            sig = strat.signal(x)
+            #sig = strat.signal(x)
             name,variant = name.split('_')[:2]
             poss[name+variant] = pos
-            sigs[name+variant] = sig
+            #sigs[name+variant] = sig
 
+        tc = cost[symbol]
         poss = pd.DataFrame(poss).dropna()
-        sigs = pd.DataFrame(sigs).dropna()
+        #igs = pd.DataFrame(sigs).dropna()
         pos = poss.sum(axis=1)
-        sig = sigs.sum(axis=1)
-        port_pnl = pos * y #- pos.diff().abs() * .0010
-        port_sig = sig * y #- sig.diff().abs() * .0010
+        #sig = sigs.sum(axis=1)
+        pnl = pos * y - pos.diff().abs() * .0010
+        port[symbol] = pnl
+        
+        strat = VolScaleStrategy(
+            vol_window=24*30,
+            target_vol=0.20,
+            strat_weight=1
+        )
+        strat.fit(x)
+        pos = strat.predict(x)
+        benchmark = pos * y - pos.diff().abs() * .0010
+        bnch[symbol] = benchmark
 
-        sigs['sr30'] = (port_pnl.ewm(span=24*30).mean() / port_pnl.ewm(span=24*30).std()).shift(24*30)
+bnch_pnl = bnch.mean(axis=1)
+port_pnl = port.mean(axis=1)
+bcv = BlockBootstrap(
+    block_size=24*90, n_bootstraps=1000
+)
+stats = []
+for trn,tes in bcv.split(port_pnl):
+    #trn = trn[:24*90]
+    pnl = port_pnl.iloc[trn]
+    benchmark = bnch_pnl.iloc[trn]
+    stat = calcaulte_pnl_stats(pnl,benchmark=benchmark,print_results=False)
+    stat = stat.dropna()
+    #stat['max_loss'] = pnl.cumsum().min()
+    #stat['time_passing'] = (pnl.cumsum() >= .15).argmax()
+    stats.append(stat)
+stats = pd.concat(stats,axis=1).T
+print(stats.describe())
 
-        #sigs['vol'] = y.ewm(span=24*30).std()
-
-        y = port_pnl.reindex(sigs.dropna().index).dropna()
-        x = sigs.reindex(y.index)
-        y1,y2 = train_test_split(y,test_size=0.5,random_state=42,shuffle=False)
-        x1,x2 = x.reindex(y1.index),x.reindex(y2.index)
-        y1 = triple_barrier(
-            returns=y1,
-            vol=0.01,
-            tp_multiplier=5,
-            sl_multiplier=1,
-            max_holding=48,
-        )['label']
-        x1 = x1.reindex(y1.index)
-
-        #coefs = pd.DataFrame(mod_sign.coef_,index=mod_sign.classes_,columns=mod_sign.feature_names_in_)
-        #coefs.T.plot(kind='bar',alpha=0.5)
-
-        #mod_size = LogisticRegressionCV(penalty='l2',cv=5,n_jobs=-1,random_state=42,fit_intercept=True,class_weight='balanced')
-        mod_size = RandomForestClassifier(n_estimators=100,random_state=42,n_jobs=-1,class_weight='balanced')
-        mod_size.fit(x1,y1)
-
-        prob = pd.DataFrame(mod_size.predict_proba(x),index=x.index,columns=mod_size.classes_)
-
-        f = prob[1]
-        f = np.sign(f - f.expanding(24*90).median()).clip(0).ewm(span=12).mean()
-        yh = (f * pos).loc[x2.index[0]:]
-        y = pos.loc[x2.index[0]:]
-        yh = yh * ret - yh.diff().abs()*.0010
-        y = y * ret - y.diff().abs()*.0010
-
-        ax1,ax2 = axes[0,i%c],axes[1,i%c]
-        pnl_curve(y,ax=ax1)
-        pnl_curve(yh,ax=ax2)
-
-        print(y.corr(yh))
-        #ax.axvline(x=x2.index[0],linestyle='--',color='black')
-
-        #coefs = pd.DataFrame(mod.coef_,index=mod.classes_,columns=mod.feature_names_in_)
-        #coefs.T.plot(kind='bar',alpha=0.5)
-
+r,c = 3,5
+fig,axes = plt.subplots(r,c)
+for i,col in enumerate(stats.columns):
+    #if i >= 12: break
+    ax = axes[i//c,i%c]
+    ax.set_title(col)
+    hist(stats[col].dropna(),ax=ax)
 plt.show()

@@ -6,6 +6,7 @@ from typing import Union
 from tqdm import tqdm
 from datetime import timedelta,datetime
 import time
+from scipy.stats.mstats import winsorize as scipy_winsorize
 
 def to_milliseconds(
     dt: Union[str, datetime, pd.Timestamp, int, float]
@@ -69,7 +70,7 @@ def align_idx(
     y_clean = y[mask]
     X_clean = X[mask]
 
-    logger.info(f"Aligned: {len(y_clean)} samples (from {len(common_idx)})")
+    #logger.info(f"Aligned: {len(y_clean)} samples (from {len(common_idx)})")
     return X_clean, y_clean
 
 def reverse_sigmoid(vol, center=0.75, steepness=10, floor=0.1):
@@ -163,3 +164,32 @@ def triple_barrier(
         #i = i + 1
     
     return pd.DataFrame(events).set_index('start_time')
+
+def winsorize(data: pd.Series | np.ndarray, 
+                      lower_limit: float = 0.05, 
+                      upper_limit: float = 0.05) -> pd.Series:
+    """
+    Returns a winsorized version of the input series.
+    
+    Parameters:
+    - data: Input pandas Series or NumPy array.
+    - lower_limit: Proportion to winsorize from the lower end (e.g., 0.05 for 5th percentile).
+    - upper_limit: Proportion to winsorize from the upper end (e.g., 0.05 for 95th percentile).
+    
+    Returns:
+    - Winsorized pandas Series.
+    
+    Note: Requires scipy installed.
+    """
+    if not isinstance(data, (pd.Series, np.ndarray)):
+        raise ValueError("Input must be a pandas Series or NumPy array.")
+    
+    # winsorize returns a masked array if there are NaNs, but we convert back
+    winsorized_array = scipy_winsorize(data, limits=[lower_limit, upper_limit])
+    
+    # If input is Series, preserve index and name
+    if isinstance(data, pd.Series):
+        return pd.Series(winsorized_array.data if np.ma.is_masked(winsorized_array) else winsorized_array,
+                         index=data.index, name=data.name)
+    
+    return pd.Series(winsorized_array,data.index)

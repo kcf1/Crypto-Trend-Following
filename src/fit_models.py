@@ -4,25 +4,24 @@ from config import logger
 import api_bnb as bn
 import api_mt5 as mt
 import db_read as db
-from strat_models import EmaVolStrategy,AccelVolStrategy,BreakVolStrategy,BlockVolStrategy,WedThuStrategy,RevStrategy
+from strat_models import EmaVolStrategy,AccelVolStrategy,BreakVolStrategy,BlockVolStrategy,WedThuStrategy,RevStrategy,OrthAlphaStrategy
 from strat_io import save_model,load_model,reset_models
 
 logger.info("Starting model refitting session...")
 target_vol = 0.30
 
-
 for symbol in PORTFOLIO:
     contract_value = db.get_contract_value(symbol)
     symbol_bnb = db.get_binance_symbol(symbol)
-    bars = db.read_klines(symbol_bnb,limit=24*360*10)
-    #bars = db.read_mtbars(symbol,limit=24*360*10)
-    #bars['volume'] = bars['tick_volume']
+    #bars = db.read_klines(symbol_bnb,limit=24*360*10)
+    bars = db.read_mtbars(symbol,limit=24*360*10)
+    bars['volume'] = bars['tick_volume']
 
     reset_models(symbol)
     # ------------------------------------------------------------------ #
     # 1. EMA Standardized × Vol State → Position (% of capital)
     # ------------------------------------------------------------------ #
-    strat_weight = 0.10
+    strat_weight = 0.20
     variants = [24,48,96,192]
     variant_weight = strat_weight / len(variants)
     if strat_weight > 1e-6:
@@ -33,7 +32,8 @@ for symbol in PORTFOLIO:
                 vol_window=24*30,
                 weibull_c=2,
                 alpha=1.0,
-                target_vol=.3,
+                fit_decay=True,
+                target_vol=target_vol,
                 strat_weight=variant_weight
             )
             strat.fit(bars)
@@ -46,7 +46,7 @@ for symbol in PORTFOLIO:
     # ------------------------------------------------------------------ #
     # 2. EMA Acceleration × Vol State → Position (% of capital)
     # ------------------------------------------------------------------ #
-    strat_weight = 0.10
+    strat_weight = 0.15
     variants = [24,48,96,192]
     variant_weight = strat_weight / len(variants)
     if strat_weight > 1e-6:
@@ -58,7 +58,8 @@ for symbol in PORTFOLIO:
                 vol_window=24*30,
                 weibull_c=2,
                 alpha=1.0,
-                target_vol=.3,
+                fit_decay=True,
+                target_vol=target_vol,
                 strat_weight=variant_weight
             )
             strat.fit(bars)
@@ -71,7 +72,7 @@ for symbol in PORTFOLIO:
     # ------------------------------------------------------------------ #
     # 3. Breakout (smoothed) × Vol State → Position (% of capital)
     # ------------------------------------------------------------------ #
-    strat_weight = 0.40
+    strat_weight = 0.20
     variants = [48,96,192,384]
     variant_weight = strat_weight / len(variants)
     if strat_weight > 1e-6:
@@ -82,6 +83,7 @@ for symbol in PORTFOLIO:
                 vol_window=24*30,
                 weibull_c=2,
                 alpha=1.0,
+                fit_decay=True,
                 target_vol=target_vol,
                 strat_weight=variant_weight
             ) 
@@ -95,7 +97,7 @@ for symbol in PORTFOLIO:
     # ------------------------------------------------------------------ #
     # 4. Block Momentum (Higher High + Higher Low) × Vol Tilt → Position
     # ------------------------------------------------------------------ #
-    strat_weight = 0.30
+    strat_weight = 0.15
     variants = [48,96,192,384]
     variant_weight = strat_weight / len(variants)
     if strat_weight > 1e-6:
@@ -106,6 +108,7 @@ for symbol in PORTFOLIO:
                 vol_window=24*30,
                 weibull_c=2,
                 alpha=1.0,
+                fit_decay=True,
                 target_vol=target_vol,
                 strat_weight=variant_weight
             ) 
@@ -158,5 +161,29 @@ for symbol in PORTFOLIO:
                 symbol=symbol,
                 model_name=f'RevStrategy_{reversal_window:0>4}'
             )
-
+            
+    # ------------------------------------------------------------------ #
+    # 7. Momentum-Orthogonal Alpha → Position
+    # ------------------------------------------------------------------ #
+    strat_weight = 0.20
+    variants = [24,48,96,192]
+    variant_weight = strat_weight / len(variants)
+    if strat_weight > 1e-6:
+        for forward_window in variants:
+            strat = OrthAlphaStrategy(
+                forward_window=forward_window,
+                vol_window=24*30,
+                regression_window=24*30,
+                alpha=1.0,
+                fit_decay=True,
+                target_vol=target_vol,
+                strat_weight=variant_weight
+            )
+            strat.fit(bars)
+            save_model(
+                model=strat,
+                symbol=symbol,
+                model_name=f'OrthAlphaStrategy_{forward_window:0>4}'
+            )
+            
 logger.success("Done!")

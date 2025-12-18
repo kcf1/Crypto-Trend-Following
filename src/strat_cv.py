@@ -1,8 +1,7 @@
 import numpy as np
 from sklearn.model_selection import BaseCrossValidator
 
-
-class BlockBootstrapCV(BaseCrossValidator):
+class BlockBootstrap(BaseCrossValidator):
     """
     Block-bootstrap cross-validation.
 
@@ -67,3 +66,79 @@ class BlockBootstrapCV(BaseCrossValidator):
             val_idx = np.arange(n_samples)
 
             yield train_idx, val_idx
+
+class BlockPermutation(BaseCrossValidator):
+    """
+    Block permutation cross-validator for time series.
+
+    Divides the data into non-overlapping blocks of length `block_size`,
+    then in each iteration shuffles (permutes) these blocks and concatenates
+    them to form a resampled training set of approximately the original length.
+    The validation set is always the original full dataset.
+
+    This provides out-of-bag-like evaluation while preserving local temporal
+    structure within blocks and avoiding sample duplication in each split.
+
+    Parameters
+    ----------
+    block_size : int
+        Size of each non-overlapping block.
+    n_splits : int, default=100
+        Number of permutation (shuffling) iterations.
+    random_state : int, RandomState instance or None, default=None
+        Controls randomness of the block permutation.
+
+    Notes
+    -----
+    - Data is split into floor(n_samples / block_size) full blocks.
+    - Any remaining samples at the end are discarded for clean blocking.
+    - Each split uses a random permutation of these blocks.
+    - No sample appears more than once in any training split.
+    - Validation set = full original data (standard for variance reduction).
+    """
+
+    def __init__(self, block_size, n_splits=100, random_state=None):
+        self.block_size = block_size
+        self.n_splits = n_splits
+        self.random_state = random_state
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.n_splits
+
+    def split(self, X, y=None, groups=None):
+        rng = np.random.default_rng(self.random_state)
+
+        n_samples = X.shape[0]
+        if self.block_size <= 0 or self.block_size > n_samples:
+            raise ValueError("block_size must be positive and <= n_samples")
+
+        # Number of complete non-overlapping blocks
+        n_blocks = n_samples // self.block_size
+        if n_blocks == 0:
+            raise ValueError("block_size is too large: no complete block fits")
+
+        # Start indices of each non-overlapping block
+        block_starts = np.arange(n_blocks) * self.block_size
+        # Corresponding index arrays for each block
+        blocks = [np.arange(start, start + self.block_size) for start in block_starts]
+
+        # Total samples in full blocks
+        n_train_samples = n_blocks * self.block_size
+
+        for _ in range(self.n_splits):
+            # Shuffle block order without replacement
+            permuted_order = rng.permutation(n_blocks)
+            train_idx = np.concatenate([blocks[i] for i in permuted_order])
+            
+            # Ensure exact length (though it already is)
+            assert len(train_idx) == n_train_samples
+            assert len(np.unique(train_idx)) == n_train_samples  # no duplicates
+
+            # Validation = full original data
+            val_idx = np.arange(n_samples)
+
+            yield train_idx, val_idx
+
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(block_size={self.block_size}, "
+                f"n_splits={self.n_splits}, random_state={self.random_state})")

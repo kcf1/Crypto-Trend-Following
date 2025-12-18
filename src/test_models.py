@@ -31,14 +31,14 @@ r,c = 2,3
 fig,axes = plt.subplots(r,c)
 port = pd.DataFrame()
 stats = pd.DataFrame()
-all_prc = pd.DataFrame({symbol:read_klines(symbol+'T')['close'] for symbol in symbols})
+#all_prc = pd.DataFrame({symbol:read_klines(symbol+'T')['close'] for symbol in symbols})
 
 for i,symbol in enumerate(symbols):
     pnls = pd.DataFrame()
     poss = pd.DataFrame()
     #df = read_klines(symbol+'T',limit=24*360*4)
     #df = pd.concat([df,all_prc],axis=1).dropna()
-    df = read_mtbars(symbol)
+    df = read_mtbars(symbol,limit=24*360*5)
     df['volume'] = df['tick_volume']
     #prc = df['close']
     ret = np.log(df['close']).diff().shift(-1)
@@ -51,25 +51,27 @@ for i,symbol in enumerate(symbols):
             test_size=0.5,
             shuffle=False  # This ensures sequential split
         )
-        strat_weight = 0.10
-        target_vol = 0.3
-        variants = [6,9,12,15]
+        strat_weight = 1.0
+        target_vol = 0.35
+        variants = [24,48,96,192]
         variant_weight = strat_weight / len(variants)
         if strat_weight > 1e-6:
-            for reversal_window in variants:
-                strat = RevStrategy(
+            for forward_window in variants:
+                strat = WeightedOrthAlphaStrategy(
+                    forward_window=forward_window,
                     vol_window=24*30,
-                    reversal_window=reversal_window,
-                    reversal_threshold=2.0,
-                    volume_threshold=0.3,
+                    regression_window=24*30,
+                    alpha=1.0,
+                    fit_decay=True,
                     target_vol=target_vol,
                     strat_weight=variant_weight
                 )
                 strat.fit(x)
+            
                 pos = strat.predict(x)
-                poss[reversal_window] = pos
+                poss[forward_window] = pos
                 pnl = pos * y - pos.diff().abs() * .0010
-                pnls[reversal_window] = pnl
+                pnls[forward_window] = pnl
 
         strat = VolScaleStrategy(
             vol_window=24*30,
@@ -86,7 +88,7 @@ for i,symbol in enumerate(symbols):
         pnl_curve(pnl,ax=ax1)
         ax1.set_title(symbol+' (10bps tc)')
         pnls.cumsum().plot(linestyle='--',alpha=0.5,ax=ax1,secondary_y=True)
-        #ax1.legend(['VolScaled','EmaDiff'])
+        ax1.legend(['VolScaled','OrthAlpha'])
         port[symbol] = pnl
         ax2 = axes[1,i%c]
         sns.heatmap(pnls.corr(),annot=True,ax=ax2)

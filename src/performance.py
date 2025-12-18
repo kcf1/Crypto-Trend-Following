@@ -6,7 +6,7 @@ from statsmodels.api import OLS,add_constant
 from utils import align_idx
 
 
-def calcaulte_pnl_stats(pnl: pd.Series, pos_raw: pd.Series=None, benchmark: pd.Series=None) -> None:
+def calcaulte_pnl_stats(pnl: pd.Series, pos_raw: pd.Series=None, benchmark: pd.Series=None, print_results: bool=True) -> None:
     """Calculate in-sample PnL + turnover."""
     pnl_clean = pnl.dropna()
     pnl_daily = pnl_clean.resample('d').sum()
@@ -34,7 +34,7 @@ def calcaulte_pnl_stats(pnl: pd.Series, pos_raw: pd.Series=None, benchmark: pd.S
     mean_ann = pnl_daily.mean() * 360
     vol_ann = pnl_daily.std() * 360**0.5
     downside = pnl_daily[pnl_daily < 0]
-    down_vol = downside.std() * 360**0.5 if len(downside) > 0 else 1e-9
+    down_vol = ((downside**2).mean()**0.5) * 360**0.5 if len(downside) > 0 else 1e-9
 
     var95 = np.percentile(pnl_daily, 5)
     cvar95 = pnl_daily[pnl_daily <= var95].mean()
@@ -92,24 +92,25 @@ def calcaulte_pnl_stats(pnl: pd.Series, pos_raw: pd.Series=None, benchmark: pd.S
 
     # --- Log ---
     pnl_stats_series = pd.Series(pnl_stats)
-    logger.info(f"In-sample ({len(pnl_clean)}) PnL & Turnover Stats:")
-    logger.info(f"  Mean (ann):     {mean_ann:+.2%}")
-    logger.info(f"  Vol (ann):      {vol_ann:.2%}")
-    logger.info(f"  CVaR95:         {cvar95:+.2%}")
-    logger.info(f"  CDD95:          {cdd95:+.2%}")
-    logger.info(f"  Skew (mth):     {skew_mth:.2f}")
-    logger.info(f"  Kurt (mth):     {kurt_mth:.2f}")
-    logger.info(f"  Sharpe:         {sharpe_ann:.2f}")
-    logger.info(f"  Sortino:        {sortino_ann:.2f}")
-    logger.info(f"  Calmar:         {calmar_ann:.2f}")
-    logger.info(f"  Alpha (ann):    {alpha_ann:+.2%}")
-    logger.info(f"  Beta:           {beta:.2f}")
-    logger.info(f"  Hit Rate:       {hit_rate:.2%}")
-    logger.info(f"  Profit Factor:  {profit_factor:.2f}")
-    logger.info(f"  Turnover (ann): {turnover_ann:.2f}")
-    logger.info(f"  Time in Long:   {time_in_long:.2%}")
-    logger.info(f"  Time in Short:  {time_in_short:.2%}")
-    logger.info(f"  Time in Neutral:{time_in_neutral:.2%}")
+    if print_results:
+        logger.info(f"In-sample ({len(pnl_clean)}) PnL & Turnover Stats:")
+        logger.info(f"  Mean (ann):     {mean_ann:+.2%}")
+        logger.info(f"  Vol (ann):      {vol_ann:.2%}")
+        logger.info(f"  CVaR95:         {cvar95:+.2%}")
+        logger.info(f"  CDD95:          {cdd95:+.2%}")
+        logger.info(f"  Skew (mth):     {skew_mth:.2f}")
+        logger.info(f"  Kurt (mth):     {kurt_mth:.2f}")
+        logger.info(f"  Sharpe:         {sharpe_ann:.2f}")
+        logger.info(f"  Sortino:        {sortino_ann:.2f}")
+        logger.info(f"  Calmar:         {calmar_ann:.2f}")
+        logger.info(f"  Alpha (ann):    {alpha_ann:+.2%}")
+        logger.info(f"  Beta:           {beta:.2f}")
+        logger.info(f"  Hit Rate:       {hit_rate:.2%}")
+        logger.info(f"  Profit Factor:  {profit_factor:.2f}")
+        logger.info(f"  Turnover (ann): {turnover_ann:.2f}")
+        logger.info(f"  Time in Long:   {time_in_long:.2%}")
+        logger.info(f"  Time in Short:  {time_in_short:.2%}")
+        logger.info(f"  Time in Neutral:{time_in_neutral:.2%}")
     return pnl_stats_series
 
 def regress_incremental(new_signal: pd.Series, bars: pd.DataFrame, horizon: int=24, interaction_only: bool=False, base: BaseStrategy=None) -> None:

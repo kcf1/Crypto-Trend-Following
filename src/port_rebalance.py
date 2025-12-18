@@ -86,7 +86,7 @@ def _rebalance_asset(symbol: str, capital_allocation: float) -> None:
         logger.warning(f"No models found for {symbol}: {model_dir}")
         return
 
-    models: List[BaseStrategy] = []
+    models: Dict[BaseStrategy] = {}
     for model_file in model_dir.glob("*.joblib"):
         try:
             data = load_model(str(model_file))
@@ -94,7 +94,7 @@ def _rebalance_asset(symbol: str, capital_allocation: float) -> None:
             if not isinstance(model, BaseStrategy):
                 logger.warning(f"Invalid model type in {model_file}")
                 continue
-            models.append(model)
+            models[model_file.name] = model
             logger.debug(f"Loaded model: {model_file.name}")
         except Exception as e:
             logger.error(f"Failed to load model {model_file}: {e}")
@@ -107,7 +107,11 @@ def _rebalance_asset(symbol: str, capital_allocation: float) -> None:
     try:
         # Use latest close for all models
         #close_series = bars['close']
-        position_pct = sum(strat.one_step_predict(bars) for strat in models)
+        all_pos = []
+        for name,model in models.items():
+            logger.info(f"{name}")
+            all_pos.append(model.one_step_predict(bars))
+        position_pct = sum(all_pos)
         #position_pct = max(min(position_pct, 2.0), -2.0)  # cap at ±200%
         logger.info(f"{symbol}: aggregate signal = {position_pct:+.2%}")
     except Exception as e:
