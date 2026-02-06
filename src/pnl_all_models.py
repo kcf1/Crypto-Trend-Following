@@ -101,7 +101,7 @@ for i,symbol in enumerate(symbols):
         poss = pd.DataFrame(poss)
         pos = poss.sum(axis=1)
         pos = pos#[(pos.index.weekday != 5)].reindex(pos.index).ffill()
-        port_pnl = pos * y - pos.diff().abs() * tc
+        port_pnl = pos * y #- pos.diff().abs() * tc
 
         pnl_curve(port_pnl,ax=ax1)
         #pnl_curve(port_pnl.loc[trading_start:],ax=ax1)
@@ -113,7 +113,7 @@ for i,symbol in enumerate(symbols):
         ax2 = axes[1,i%c]
         ax2.set_title(symbol+' by Strategy (10bps tc)')
         pos = poss.groupby(level=0,axis=1).sum()#[(poss.index.weekday != 5)].reindex(poss.index).ffill()
-        pnl = pos.mul(y,axis=0) - pos.diff().abs() * tc
+        pnl = pos.mul(y,axis=0) #- pos.diff().abs() * tc
         pnl = pnl * 0.20 / 95 / pnl.std()
         pnl.cumsum().plot(linestyle='--',ax=ax2)
         #pnl.loc[trading_start:].cumsum().plot(linestyle='--',ax=ax2)
@@ -123,14 +123,14 @@ for i,symbol in enumerate(symbols):
         corr_dendrogram(poss.corr().fillna(0),ax=ax3)
         #corr_dendrogram(poss.loc[trading_start:].corr().fillna(0),ax=ax3)
     #except: pass
-port.mean(axis=1).to_csv('data/tf_single.csv')
+#port.mean(axis=1).to_csv('data/tf_single.csv')
 ax = pnl_curve(port.mean(axis=1))
 stats = calcaulte_pnl_stats(port.mean(axis=1),benchmark=bnch.mean(axis=1),print_results=True)
 #ax = pnl_curve(port.mean(axis=1).loc[trading_start:])
 #stats = calcaulte_pnl_stats(port.mean(axis=1).loc[trading_start:],benchmark=bnch.mean(axis=1).loc[trading_start:])
 ax.set_title('Portfolio (10bps tc)')
 #port.cumsum().plot(linestyle='--',ax=ax)
-#plt.show()
+plt.show()
 
 if False:
     btc = read_mtbars(symbol,limit=24*360*5)['close']
