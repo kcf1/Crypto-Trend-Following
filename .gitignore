@@ -11,7 +11,13 @@ others/
 # Optional: Ignore Python virtual environment
 .venv/
 
-# Optional: Ignore temporary files and logs
+# Ignore simulation PnL plots
+plot/simulation_pnl/
+
+# Ignore logs
+logs/
+
+# Optional: Ignore temporary files
 *.log
 temp_output.txt
 temp_output.csv
