@@ -330,6 +330,29 @@ All strategies inherit `BaseStrategy` (sklearn-style `.fit()` / `.predict()`) an
 
 ---
 
+### 3.5 Current Fit Parameters (fit_models.py)
+
+**Global settings**
+- `target_vol = 0.30`
+- Data: `read_mtbars(symbol, limit=24*360*10)` (10 years of 1H bars)
+- `bars['volume'] = bars['tick_volume']`
+
+**Per-strategy configuration**
+
+| Strategy | strat_weight | Variants | Parameters |
+|----------|--------------|----------|------------|
+| **EmaVolStrategy** | 0.20 | `fast_ema_window` ∈ [24, 48, 96, 192] | `slow_ema_multiplier=2`, `vol_window=720`, `weibull_c=2`, `alpha=1.0`, `fit_decay=True` |
+| **AccelVolStrategy** | 0.15 | `fast_ema_window` ∈ [24, 48, 96, 192] | `slow_ema_multiplier=2`, `diff_multiplier=1.0`, `vol_window=720`, `weibull_c=2`, `alpha=1.0`, `fit_decay=True` |
+| **BreakVolStrategy** | 0.20 | `breakout_window` ∈ [48, 96, 192, 384] | `smooth_window=12`, `vol_window=720`, `weibull_c=2`, `alpha=1.0`, `fit_decay=True` |
+| **BlockVolStrategy** | 0.15 | `block_window` ∈ [48, 96, 192, 384] | `smooth_window=12`, `vol_window=720`, `weibull_c=2`, `alpha=1.0`, `fit_decay=True` |
+| **WedThuStrategy** | 0.10 | `vol_window` ∈ [1440, 4320] (60d, 180d) | `target_vol=0.30` |
+| **RevStrategy** | 0.10 | `reversal_window` ∈ [6, 9, 12, 15] | `vol_window=720`, `reversal_threshold=2.0`, `volume_threshold=0.3` |
+| **OrthAlphaStrategy** | 0.20 | `forward_window` ∈ [24, 48, 96, 192] | `vol_window=720`, `regression_window=720`, `alpha=1.0`, `fit_decay=True` |
+
+Variant weight = `strat_weight / len(variants)` (e.g. EmaVol 0.20/4 = 0.05 per variant). All strategies use `target_vol=0.30` unless noted.
+
+---
+
 ## 4. Additional Architecture Components
 
 ### 4.1 Tech Stack
