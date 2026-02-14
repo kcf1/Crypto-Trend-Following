@@ -1,5 +1,8 @@
 # MT5 Trading System
 
+![Portfolio Backtest](plot/portfolio/precost/CombStrategy_Pnl.png)
+![Strategy Breakdown](plot/portfolio/precost/CombStrategy_Breakdown.png)
+
 Automated crypto portfolio rebalancing bot for MetaTrader 5. Runs scheduled sessions that update market data, aggregate signals from multiple pre-fitted strategy models, and adjust MT5 positions. Designed for FTMO and similar prop-trading environments.
 
 ## Features
